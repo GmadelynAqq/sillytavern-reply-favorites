@@ -6,6 +6,6 @@
     "js": "index.js",
     "css": "style.css",
     "author": "GmadelynAqq",
-    "version": "1.0.0",
-    "description": "收藏喜欢的角色回复，并导出为 Markdown 或 PNG 图片。"
+    "version": "1.1.0",
+    "description": "收藏角色回复与连续楼层，支持合集整理、随机重温及 Markdown、PNG、JSON 导出。"
 }
