@@ -11,10 +11,10 @@
 3. 粘贴本仓库的 HTTPS Git URL
 4. 安装完成后刷新页面
 
-仓库地址发布后形如：
+安装地址：
 
 ```text
-https://github.com/<你的账号>/sillytavern-reply-favorites
+https://github.com/GmadelynAqq/sillytavern-reply-favorites
 ```
 
 ## 使用
