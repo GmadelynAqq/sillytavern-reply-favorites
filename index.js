@@ -948,9 +948,6 @@ function cleanTavernMessageClone(clone) {
         '.extraMesButtons',
         '.swipe_left',
         '.swipeRightBlock',
-        '.mesIDDisplay',
-        '.mes_timer',
-        '.tokenCounterDisplay',
         '.rf-message-favorite',
         '.mes_reasoning_details',
         '.mes_media_wrapper:empty',
@@ -1080,17 +1077,36 @@ async function inlineTavernResources(stage, cache) {
 
         for (const pseudo of ['::before', '::after']) {
             const pseudoStyle = getComputedStyle(element, pseudo);
-            const declarations = [];
+            const embeddedResources = new Map();
             for (const [cssProperty, jsProperty] of resourceProperties) {
                 const value = pseudoStyle[jsProperty];
                 if (value?.includes('url(')) {
-                    declarations.push(`${cssProperty}: ${await embedCssUrls(value, cache)} !important`);
+                    embeddedResources.set(cssProperty, await embedCssUrls(value, cache));
                 }
             }
-            if (declarations.length) {
+            if (embeddedResources.size) {
                 const id = `r${resourceId++}`;
                 element.dataset.rfResourceId = id;
-                pseudoRules.push(`[data-rf-resource-id="${id}"]${pseudo} { ${declarations.join('; ')}; }`);
+                pseudoRules.push(`[data-rf-resource-id="${id}"]${pseudo} { content: none !important; }`);
+
+                const layer = document.createElement('span');
+                layer.className = 'rf-materialized-pseudo';
+                layer.dataset.rfPseudo = pseudo.slice(2);
+                layer.setAttribute('aria-hidden', 'true');
+                for (const property of pseudoStyle) {
+                    layer.style.setProperty(
+                        property,
+                        pseudoStyle.getPropertyValue(property),
+                        pseudoStyle.getPropertyPriority(property),
+                    );
+                }
+                for (const [property, value] of embeddedResources) {
+                    layer.style.setProperty(property, value, 'important');
+                }
+                layer.style.setProperty('content', 'normal', 'important');
+                layer.style.setProperty('pointer-events', 'none', 'important');
+                element.style.setProperty('isolation', 'isolate');
+                pseudo === '::before' ? element.prepend(layer) : element.append(layer);
             }
         }
     }

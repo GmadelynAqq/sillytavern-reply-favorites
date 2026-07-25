@@ -631,6 +631,10 @@
     background: transparent;
 }
 
+.rf-tavern-export-stage .rf-materialized-pseudo {
+    pointer-events: none !important;
+}
+
 @keyframes rf-highlight {
     0%, 100% { box-shadow: none; }
     20%, 70% { box-shadow: 0 0 0 3px #efb64f, 0 0 28px rgba(239, 182, 79, .48); }
