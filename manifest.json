@@ -6,6 +6,6 @@
     "js": "index.js",
     "css": "style.css",
     "author": "GmadelynAqq",
-    "version": "1.3.3",
+    "version": "1.3.4",
     "description": "收藏角色回复与连续楼层，支持合集整理、随机重温，以及珍藏卡片或当前酒馆楼层美化样式的 Markdown、PNG、JSON 导出。"
 }

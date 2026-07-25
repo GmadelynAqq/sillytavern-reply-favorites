@@ -13,6 +13,7 @@ import { escapeHtml } from '../../../utils.js';
 
 const EXTENSION_KEY = 'replyFavorites';
 const FAVORITE_ID_KEY = 'reply_favorite_id';
+const IMAGE_EXPORT_LOCK_KEY = '__replyFavoritesImageExportTask';
 const MAX_CANVAS_HEIGHT = 15000;
 const IMAGE_WIDTH = 1200;
 const settingsDefaults = Object.freeze({
@@ -1140,7 +1141,7 @@ async function inlineTavernResources(stage, cache) {
     }
 }
 
-async function renderTavernItemCanvas(item, resourceCache) {
+async function renderTavernItemCanvas(item, resourceCache, constrainHeight = false) {
     const htmlToImage = await getHtmlToImage();
     const chatRoot = document.querySelector('#chat');
     if (!chatRoot) throw new Error('当前页面没有聊天区域');
@@ -1162,9 +1163,14 @@ async function renderTavernItemCanvas(item, resourceCache) {
             document.fonts?.ready || Promise.resolve(),
             new Promise(resolve => setTimeout(resolve, 1800)),
         ]);
+        const basePixelRatio = Math.min(2, Math.max(1.25, globalThis.devicePixelRatio || 1));
+        const stageHeight = Math.max(1, Math.ceil(stage.getBoundingClientRect().height || stage.scrollHeight || 1));
+        const pixelRatio = constrainHeight
+            ? Math.min(basePixelRatio, Math.max(0.35, (MAX_CANVAS_HEIGHT - 320) / stageHeight))
+            : basePixelRatio;
         const canvas = await htmlToImage.toCanvas(stage, {
             cacheBust: true,
-            pixelRatio: Math.min(2, Math.max(1.25, globalThis.devicePixelRatio || 1)),
+            pixelRatio,
             backgroundColor: 'transparent',
             imagePlaceholder: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
             style: {
@@ -1226,17 +1232,25 @@ function drawExportHeader(context, settings, theme) {
 async function exportTavernImages(items, baseName) {
     const rendered = [];
     const resourceCache = new Map();
+    const singleItem = items.length === 1;
     for (let index = 0; index < items.length; index++) {
         toastr.info(`正在内嵌装饰并复刻酒馆楼层 ${index + 1}/${items.length}…`, '', { timeOut: 1200 });
-        const canvas = await renderTavernItemCanvas(items[index], resourceCache);
-        rendered.push(...splitTavernCanvas(canvas));
+        const canvas = await renderTavernItemCanvas(items[index], resourceCache, singleItem);
+        rendered.push(...(singleItem ? [canvas] : splitTavernCanvas(canvas)));
     }
 
-    const entries = rendered.map(canvas => ({
-        canvas,
-        width: IMAGE_WIDTH - 96,
-        height: Math.ceil(canvas.height * (IMAGE_WIDTH - 96) / canvas.width),
-    }));
+    const entries = rendered.map(canvas => {
+        const targetWidth = IMAGE_WIDTH - 96;
+        const naturalHeight = Math.ceil(canvas.height * targetWidth / canvas.width);
+        const scale = singleItem && naturalHeight > MAX_CANVAS_HEIGHT - 260
+            ? (MAX_CANVAS_HEIGHT - 260) / naturalHeight
+            : 1;
+        return {
+            canvas,
+            width: Math.floor(targetWidth * scale),
+            height: Math.floor(naturalHeight * scale),
+        };
+    });
     const pages = [];
     let page = [];
     let pageHeight = 150;
@@ -1263,7 +1277,7 @@ async function exportTavernImages(items, baseName) {
         drawExportHeader(context, settings, theme);
         let y = 132;
         for (const entry of pages[pageIndex].entries) {
-            context.drawImage(entry.canvas, 48, y, entry.width, entry.height);
+            context.drawImage(entry.canvas, Math.round((IMAGE_WIDTH - entry.width) / 2), y, entry.width, entry.height);
             y += entry.height + 36;
         }
         const suffix = pages.length > 1 ? `-${pageIndex + 1}of${pages.length}` : '';
@@ -1327,7 +1341,7 @@ async function exportCardImages(items, baseName) {
     }
 }
 
-async function exportImages(items, baseName) {
+async function runImageExport(items, baseName) {
     if (!items.length) {
         toastr.info('当前没有可导出的收藏');
         return;
@@ -1343,6 +1357,24 @@ async function exportImages(items, baseName) {
         toastr.warning(`${error.message || '无法复刻当前楼层'}，已改用珍藏卡片导出`, '酒馆美化导出回退');
         await exportCardImages(items, baseName);
     }
+}
+
+function exportImages(items, baseName) {
+    const activeExport = globalThis[IMAGE_EXPORT_LOCK_KEY];
+    if (activeExport) {
+        toastr.info('图片正在生成，请稍候', '', { timeOut: 1000 });
+        return activeExport;
+    }
+
+    const task = runImageExport(items, baseName);
+    globalThis[IMAGE_EXPORT_LOCK_KEY] = task;
+    $('#rf-export-image, .rf-card-image').prop('disabled', true).attr('aria-busy', 'true');
+    const clearExportLock = () => {
+        if (globalThis[IMAGE_EXPORT_LOCK_KEY] === task) delete globalThis[IMAGE_EXPORT_LOCK_KEY];
+        $('#rf-export-image, .rf-card-image').prop('disabled', false).removeAttr('aria-busy');
+    };
+    task.then(clearExportLock, clearExportLock);
+    return task;
 }
 
 function exportJsonBackup() {
@@ -1521,48 +1553,68 @@ async function jumpToFavorite(item) {
 }
 
 function bindEvents() {
-    $(document)
-        .on('click', '.rf-message-favorite', async function (event) {
+    const documentRoot = $(document);
+    documentRoot.off('.replyFavorites');
+    [
+        ['click', '.rf-message-favorite'],
+        ['click', '#rf-open-fab, #rf-open-settings'],
+        ['click', '#rf-close'],
+        ['click', '#rf-overlay'],
+        ['click', '.rf-data-menu > div .menu_button'],
+        ['click', '.rf-remove'],
+        ['click', '.rf-jump'],
+        ['click', '.rf-card-image'],
+        ['click', '#rf-export-md'],
+        ['click', '#rf-export-json'],
+        ['click', '.rf-import-json'],
+        ['click', '#rf-delete-selected'],
+        ['click', '#rf-dedupe'],
+        ['click', '#rf-random'],
+        ['click', '#rf-export-image'],
+    ].forEach(([eventName, selector]) => documentRoot.off(eventName, selector));
+
+    documentRoot
+        .on('click.replyFavorites', '.rf-message-favorite', async function (event) {
             event.stopPropagation();
             await toggleFavorite(Number($(this).closest('.mes').attr('mesid')), $(this), event.shiftKey);
         })
-        .on('click', '#rf-open-fab, #rf-open-settings', openGallery)
-        .on('click', '#rf-close', closeGallery)
-        .on('click', '#rf-overlay', function (event) {
+        .on('click.replyFavorites', '#rf-open-fab, #rf-open-settings', openGallery)
+        .on('click.replyFavorites', '#rf-close', closeGallery)
+        .on('click.replyFavorites', '#rf-overlay', function (event) {
             if (event.target === this) closeGallery();
         })
-        .on('pointerdown', function (event) {
+        .on('pointerdown.replyFavorites', function (event) {
             if (!$(event.target).closest('.rf-data-menu').length) {
                 $('.rf-data-menu').prop('open', false);
             }
         })
-        .on('click', '.rf-data-menu > div .menu_button', function () {
+        .on('click.replyFavorites', '.rf-data-menu > div .menu_button', function () {
             $(this).closest('.rf-data-menu').prop('open', false);
         })
-        .on('input', '#rf-search-input', renderGallery)
-        .on('change', '#rf-character-filter, #rf-collection-filter', renderGallery)
-        .on('change', '#rf-sort', function () {
+        .on('input.replyFavorites', '#rf-search-input', renderGallery)
+        .on('change.replyFavorites', '#rf-character-filter, #rf-collection-filter', renderGallery)
+        .on('change.replyFavorites', '#rf-sort', function () {
             getSettings().sort = String($(this).val());
             saveFavorites();
             renderGallery();
         })
-        .on('change', '#rf-default-capture', function () {
+        .on('change.replyFavorites', '#rf-default-capture', function () {
             getSettings().defaultCapture = String($(this).val());
             saveFavorites();
         })
-        .on('input change', '#rf-image-render-mode, #rf-image-theme, #rf-image-background, #rf-image-background-color, #rf-image-title, #rf-image-subtitle, #rf-image-show-date', saveImagePreferences)
-        .on('change', '#rf-select-all', function () {
+        .on('input.replyFavorites change.replyFavorites', '#rf-image-render-mode, #rf-image-theme, #rf-image-background, #rf-image-background-color, #rf-image-title, #rf-image-subtitle, #rf-image-show-date', saveImagePreferences)
+        .on('change.replyFavorites', '#rf-select-all', function () {
             for (const item of filteredItems) {
                 this.checked ? selectedIds.add(item.id) : selectedIds.delete(item.id);
             }
             renderGallery();
         })
-        .on('change', '.rf-card-check input', function () {
+        .on('change.replyFavorites', '.rf-card-check input', function () {
             const id = $(this).closest('.rf-card').data('favorite-id');
             this.checked ? selectedIds.add(id) : selectedIds.delete(id);
             renderGallery();
         })
-        .on('input', '.rf-title, .rf-collections, .rf-tags, .rf-note', function () {
+        .on('input.replyFavorites', '.rf-title, .rf-collections, .rf-tags, .rf-note', function () {
             const card = $(this).closest('.rf-card');
             const item = getSettings().items.find(entry => entry.id === card.data('favorite-id'));
             if (!item) return;
@@ -1579,37 +1631,37 @@ function bindEvents() {
             }
             saveFavorites();
         })
-        .on('change', '.rf-title, .rf-collections, .rf-tags, .rf-note', function () {
+        .on('change.replyFavorites', '.rf-title, .rf-collections, .rf-tags, .rf-note', function () {
             renderGallery();
             toastr.success('已保存', '', { timeOut: 900 });
         })
-        .on('click', '.rf-remove', async function () {
+        .on('click.replyFavorites', '.rf-remove', async function () {
             await removeFavorite($(this).closest('.rf-card').data('favorite-id'), true);
         })
-        .on('click', '.rf-jump', async function () {
+        .on('click.replyFavorites', '.rf-jump', async function () {
             const item = getSettings().items.find(entry => entry.id === $(this).closest('.rf-card').data('favorite-id'));
             if (item) await jumpToFavorite(item);
         })
-        .on('click', '.rf-card-image', async function () {
+        .on('click.replyFavorites', '.rf-card-image', async function () {
             const item = getSettings().items.find(entry => entry.id === $(this).closest('.rf-card').data('favorite-id'));
             if (!item) return;
             await exportImages([item], `${item.characterName}-回复珍藏`);
         })
-        .on('click', '#rf-export-md', exportMarkdown)
-        .on('click', '#rf-export-json', exportJsonBackup)
-        .on('click', '.rf-import-json', function () {
+        .on('click.replyFavorites', '#rf-export-md', exportMarkdown)
+        .on('click.replyFavorites', '#rf-export-json', exportJsonBackup)
+        .on('click.replyFavorites', '.rf-import-json', function () {
             $('#rf-import-file').data('mode', $(this).data('mode')).trigger('click');
         })
-        .on('change', '#rf-import-file', async function () {
+        .on('change.replyFavorites', '#rf-import-file', async function () {
             await importJsonFile(this.files?.[0], $(this).data('mode') || 'merge');
         })
-        .on('click', '#rf-delete-selected', deleteSelected)
-        .on('click', '#rf-dedupe', removeDuplicates)
-        .on('click', '#rf-random', revisitRandom)
-        .on('click', '#rf-export-image', async () => {
+        .on('click.replyFavorites', '#rf-delete-selected', deleteSelected)
+        .on('click.replyFavorites', '#rf-dedupe', removeDuplicates)
+        .on('click.replyFavorites', '#rf-random', revisitRandom)
+        .on('click.replyFavorites', '#rf-export-image', async () => {
             await exportImages(getExportItems(), '回复珍藏馆');
         })
-        .on('keydown', function (event) {
+        .on('keydown.replyFavorites', function (event) {
             if (event.key !== 'Escape') return;
             if ($('.rf-data-menu[open]').length) {
                 $('.rf-data-menu').prop('open', false);
@@ -1621,6 +1673,8 @@ function bindEvents() {
 
 function initialize() {
     getSettings();
+    $('#rf-overlay, #rf-open-fab').remove();
+    $('.rf-settings').remove();
     document.documentElement.insertAdjacentHTML('beforeend', galleryMarkup());
     $('#extensions_settings2').append(settingsMarkup());
     bindEvents();
