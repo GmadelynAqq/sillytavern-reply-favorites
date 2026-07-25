@@ -610,13 +610,33 @@ function getSourceState(item) {
 
 function capturedMessagesMarkup(item) {
     const messages = item.messages || [];
+    const formatMessage = message => {
+        try {
+            return messageFormatting(
+                message.text,
+                message.name,
+                false,
+                Boolean(message.isUser),
+                Number(message.messageIndex),
+            );
+        } catch (error) {
+            console.warn('[reply-favorites] Could not apply Tavern message formatting.', error);
+            return escapeHtml(message.text).replace(/\n/g, '<br>');
+        }
+    };
     if (messages.length <= 1) {
-        return `<div class="rf-message">${escapeHtml(item.text).replace(/\n/g, '<br>')}</div>`;
+        const message = messages[0] || {
+            text: item.text,
+            name: item.characterName,
+            isUser: false,
+            messageIndex: item.source?.messageIndex || 0,
+        };
+        return `<div class="rf-message rf-formatted-message">${formatMessage(message)}</div>`;
     }
     return `<div class="rf-captured">${messages.map(message => `
         <div class="rf-captured-message ${message.isUser ? 'rf-user' : 'rf-character'}">
             <span>${escapeHtml(message.name)} · 第 ${Number(message.messageIndex) + 1} 层</span>
-            <div>${escapeHtml(message.text).replace(/\n/g, '<br>')}</div>
+            <div class="rf-formatted-message">${formatMessage(message)}</div>
         </div>`).join('')}</div>`;
 }
 
@@ -681,6 +701,7 @@ function openGallery() {
 }
 
 function closeGallery() {
+    $('.rf-data-menu').prop('open', false);
     $('#rf-overlay').removeClass('rf-open').attr('aria-hidden', 'true');
 }
 
@@ -1510,6 +1531,14 @@ function bindEvents() {
         .on('click', '#rf-overlay', function (event) {
             if (event.target === this) closeGallery();
         })
+        .on('pointerdown', function (event) {
+            if (!$(event.target).closest('.rf-data-menu').length) {
+                $('.rf-data-menu').prop('open', false);
+            }
+        })
+        .on('click', '.rf-data-menu > div .menu_button', function () {
+            $(this).closest('.rf-data-menu').prop('open', false);
+        })
         .on('input', '#rf-search-input', renderGallery)
         .on('change', '#rf-character-filter, #rf-collection-filter', renderGallery)
         .on('change', '#rf-sort', function () {
@@ -1581,7 +1610,12 @@ function bindEvents() {
             await exportImages(getExportItems(), '回复珍藏馆');
         })
         .on('keydown', function (event) {
-            if (event.key === 'Escape' && $('#rf-overlay').hasClass('rf-open')) closeGallery();
+            if (event.key !== 'Escape') return;
+            if ($('.rf-data-menu[open]').length) {
+                $('.rf-data-menu').prop('open', false);
+                return;
+            }
+            if ($('#rf-overlay').hasClass('rf-open')) closeGallery();
         });
 }
 

@@ -648,39 +648,86 @@
     #rf-gallery {
         width: 100vw;
         height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
         border-radius: 0;
     }
 
-    .rf-header,
+    .rf-header {
+        flex: 0 0 auto;
+        align-items: center;
+        padding: max(10px, env(safe-area-inset-top)) 16px 8px;
+    }
+
+    .rf-header h2 {
+        margin: 0;
+        font-size: 23px;
+    }
+
+    .rf-header p,
+    .rf-eyebrow {
+        display: none;
+    }
+
     #rf-list {
+        flex: 0 0 auto;
+        min-height: 55dvh;
         padding-inline: 18px;
+        overflow: visible;
     }
 
     .rf-toolbar {
-        grid-template-columns: 1fr 1fr;
-        padding-inline: 18px;
+        flex: 0 0 auto;
+        display: flex;
+        gap: 8px;
+        padding: 2px 16px 10px;
+        overflow-x: auto;
+        scrollbar-width: none;
     }
 
     .rf-search {
-        grid-column: 1 / -1;
+        min-width: min(72vw, 310px);
+        flex: 0 0 min(72vw, 310px);
+    }
+
+    #rf-character-filter,
+    #rf-collection-filter,
+    #rf-sort {
+        min-width: 128px;
+        flex: 0 0 128px;
     }
 
     .rf-select-all {
-        grid-column: 1 / -1;
+        min-width: max-content;
+        flex: 0 0 auto;
+        align-self: center;
     }
 
     .rf-actionbar {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        padding-inline: 18px;
+        flex: 0 0 auto;
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 8px;
+        min-height: 0;
+        padding: 8px 16px;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+
+    .rf-toolbar::-webkit-scrollbar,
+    .rf-actionbar::-webkit-scrollbar {
+        display: none;
     }
 
     .rf-actionbar > span:first-child {
-        grid-column: 1 / -1;
+        flex: 0 0 auto;
     }
 
     .rf-actionbar .menu_button {
-        width: 100%;
+        width: auto;
         justify-content: center;
     }
 
@@ -690,13 +737,14 @@
 
     .rf-data-menu,
     .rf-data-menu > summary {
-        width: 100%;
+        width: auto;
     }
 
     .rf-data-menu > div {
         position: fixed;
+        z-index: 10002;
         right: 18px;
-        bottom: 18px;
+        bottom: max(18px, env(safe-area-inset-bottom));
         top: auto;
         width: calc(100vw - 36px);
     }
