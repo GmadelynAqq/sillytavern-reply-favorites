@@ -14,6 +14,7 @@ import { escapeHtml } from '../../../utils.js';
 const EXTENSION_KEY = 'replyFavorites';
 const FAVORITE_ID_KEY = 'reply_favorite_id';
 const IMAGE_EXPORT_LOCK_KEY = '__replyFavoritesImageExportTask';
+const EVENT_HANDLERS_KEY = '__replyFavoritesEventHandlers';
 const MAX_CANVAS_HEIGHT = 15000;
 const IMAGE_WIDTH = 1200;
 const settingsDefaults = Object.freeze({
@@ -146,6 +147,7 @@ function normalizeItem(value) {
             isUser: Boolean(message?.isUser),
             text: cleanText(message?.text),
             messageIndex: Number.isFinite(Number(message?.messageIndex)) ? Number(message.messageIndex) : item.source.messageIndex,
+            renderedHtml: typeof message?.renderedHtml === 'string' ? message.renderedHtml : '',
         })).filter(message => message.text);
     }
     return item;
@@ -235,6 +237,7 @@ function buildCapturedMessages(chat, indexes, fallbackName) {
         isUser: Boolean(chat[index]?.is_user),
         text: cleanText(chat[index]?.mes),
         messageIndex: index,
+        renderedHtml: captureRenderedMessageHtml(index),
     })).filter(message => message.text);
 }
 
@@ -625,6 +628,14 @@ function capturedMessagesMarkup(item) {
             return escapeHtml(message.text).replace(/\n/g, '<br>');
         }
     };
+    const snapshotMarkup = message => {
+        const snapshot = parseRenderedMessageHtml(message.renderedHtml);
+        if (!snapshot) return '';
+        cleanTavernMessageClone(snapshot);
+        const renderedText = snapshot.querySelector('.mes_text');
+        if (!renderedText) return '';
+        return `<div class="rf-message rf-formatted-message rf-rendered-snapshot">${renderedText.innerHTML}</div>`;
+    };
     if (messages.length <= 1) {
         const message = messages[0] || {
             text: item.text,
@@ -632,12 +643,14 @@ function capturedMessagesMarkup(item) {
             isUser: false,
             messageIndex: item.source?.messageIndex || 0,
         };
-        return `<div class="rf-message rf-formatted-message">${formatMessage(message)}</div>`;
+        return snapshotMarkup(message)
+            || `<div class="rf-message rf-formatted-message">${formatMessage(message)}</div>`;
     }
     return `<div class="rf-captured">${messages.map(message => `
         <div class="rf-captured-message ${message.isUser ? 'rf-user' : 'rf-character'}">
-            <span>${escapeHtml(message.name)} · 第 ${Number(message.messageIndex) + 1} 层</span>
-            <div class="rf-formatted-message">${formatMessage(message)}</div>
+            ${snapshotMarkup(message) || `
+                <span>${escapeHtml(message.name)} · 第 ${Number(message.messageIndex) + 1} 层</span>
+                <div class="rf-formatted-message">${formatMessage(message)}</div>`}
         </div>`).join('')}</div>`;
 }
 
@@ -697,6 +710,7 @@ function renderGallery() {
 
 function openGallery() {
     $('#rf-overlay').addClass('rf-open').attr('aria-hidden', 'false');
+    syncFavoriteRenderedSnapshots();
     renderGallery();
     setTimeout(() => $('#rf-search-input').trigger('focus'), 50);
 }
@@ -984,13 +998,72 @@ function cleanTavernMessageClone(clone) {
     return clone;
 }
 
+function parseRenderedMessageHtml(html) {
+    if (!html) return null;
+    const template = document.createElement('template');
+    template.innerHTML = String(html).trim();
+    const message = template.content.querySelector('.mes');
+    return message instanceof HTMLElement ? message : null;
+}
+
+function getLiveMessageNode(messageIndex) {
+    return document.querySelector(`#chat .mes[mesid="${CSS.escape(String(messageIndex))}"]`);
+}
+
+function captureRenderedMessageHtml(messageIndex) {
+    const liveNode = getLiveMessageNode(messageIndex);
+    if (!liveNode) return '';
+    return cleanTavernMessageClone(liveNode.cloneNode(true)).outerHTML;
+}
+
+function syncFavoriteRenderedSnapshots(messageIndexes = null) {
+    const context = getContext();
+    if (!context.chatId) return false;
+    const requestedIndexes = Array.isArray(messageIndexes)
+        ? new Set(messageIndexes.map(Number).filter(Number.isFinite))
+        : null;
+    let changed = false;
+
+    for (const item of getSettings().items) {
+        if (String(item.source?.chatId || '') !== String(context.chatId)) continue;
+        for (const message of item.messages || []) {
+            const messageIndex = Number(message.messageIndex);
+            if (requestedIndexes && !requestedIndexes.has(messageIndex)) continue;
+            if (cleanText(context.chat?.[messageIndex]?.mes) !== cleanText(message.text)) continue;
+            const renderedHtml = captureRenderedMessageHtml(messageIndex);
+            if (renderedHtml && renderedHtml !== message.renderedHtml) {
+                message.renderedHtml = renderedHtml;
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        saveFavorites();
+        if ($('#rf-overlay').hasClass('rf-open')) renderGallery();
+    }
+    return changed;
+}
+
+function scheduleFavoriteSnapshotSync(messageIndex) {
+    const indexes = Number.isFinite(Number(messageIndex)) ? [Number(messageIndex)] : null;
+    setTimeout(() => syncFavoriteRenderedSnapshots(indexes), 450);
+    setTimeout(() => syncFavoriteRenderedSnapshots(indexes), 1400);
+}
+
 function getTavernMessageClone(item, message) {
     const context = getContext();
     const sourceIsCurrent = String(context.chatId || '') === String(item.source?.chatId || '');
     const selector = `#chat .mes[mesid="${CSS.escape(String(message.messageIndex))}"]`;
     const liveNode = sourceIsCurrent ? document.querySelector(selector) : null;
+    const currentMessage = sourceIsCurrent ? context.chat?.[message.messageIndex] : null;
+    const canReuseLiveContent = liveNode && cleanText(currentMessage?.mes) === cleanText(message.text);
+    const storedNode = parseRenderedMessageHtml(message.renderedHtml);
     const matchingTemplate = document.querySelector(`#chat .mes[is_user="${message.isUser ? 'true' : 'false'}"]`);
-    const template = liveNode || matchingTemplate || document.querySelector('#chat .mes');
+    const template = (canReuseLiveContent ? liveNode : storedNode)
+        || liveNode
+        || matchingTemplate
+        || document.querySelector('#chat .mes');
     if (!template) throw new Error('当前页面没有可用于复刻美化的消息楼层');
 
     const clone = cleanTavernMessageClone(template.cloneNode(true));
@@ -999,9 +1072,7 @@ function getTavernMessageClone(item, message) {
     clone.setAttribute('is_user', String(message.isUser));
     clone.setAttribute('is_system', 'false');
 
-    const currentMessage = sourceIsCurrent ? context.chat?.[message.messageIndex] : null;
-    const canReuseRenderedContent = liveNode && cleanText(currentMessage?.mes) === cleanText(message.text);
-    if (!canReuseRenderedContent) {
+    if (!canReuseLiveContent && !storedNode) {
         const textElement = clone.querySelector('.mes_text');
         if (!textElement) throw new Error('消息楼层缺少正文区域');
         textElement.innerHTML = messageFormatting(
@@ -1682,15 +1753,32 @@ function initialize() {
     updateImageSettingsUi();
     enhanceMessages();
 
+    const previousHandlers = globalThis[EVENT_HANDLERS_KEY];
+    if (Array.isArray(previousHandlers)) {
+        for (const [eventName, handler] of previousHandlers) {
+            eventSource.removeListener(eventName, handler);
+        }
+    }
+    const eventHandlers = [];
+    const listen = (eventName, handler) => {
+        eventSource.on(eventName, handler);
+        eventHandlers.push([eventName, handler]);
+    };
     [
         event_types.CHAT_CHANGED,
         event_types.CHAT_LOADED,
         event_types.CHARACTER_MESSAGE_RENDERED,
+        event_types.USER_MESSAGE_RENDERED,
         event_types.MESSAGE_EDITED,
         event_types.MESSAGE_UPDATED,
         event_types.MESSAGE_SWIPED,
         event_types.MORE_MESSAGES_LOADED,
-    ].forEach(eventName => eventSource.on(eventName, () => setTimeout(enhanceMessages, 0)));
+    ].filter(Boolean).forEach(eventName => listen(eventName, messageIndex => {
+        setTimeout(enhanceMessages, 0);
+        scheduleFavoriteSnapshotSync(messageIndex);
+    }));
+    globalThis[EVENT_HANDLERS_KEY] = eventHandlers;
+    scheduleFavoriteSnapshotSync();
 }
 
 jQuery(initialize);
