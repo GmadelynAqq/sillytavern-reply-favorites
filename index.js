@@ -1004,7 +1004,106 @@ function getTavernMessageClone(item, message) {
     return clone;
 }
 
-async function renderTavernItemCanvas(item) {
+function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error || new Error('无法读取装饰素材'));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function getEmbeddedResourceUrl(url, cache) {
+    if (!url || url.startsWith('data:') || url.startsWith('blob:')) return url;
+    let resolvedUrl;
+    try {
+        resolvedUrl = new URL(url, document.baseURI).href;
+    } catch {
+        return url;
+    }
+    if (!cache.has(resolvedUrl)) {
+        cache.set(resolvedUrl, (async () => {
+            const isSameOrigin = new URL(resolvedUrl).origin === location.origin;
+            const response = await fetch(resolvedUrl, {
+                mode: 'cors',
+                credentials: isSameOrigin ? 'same-origin' : 'omit',
+                cache: 'force-cache',
+            });
+            if (!response.ok) throw new Error(`装饰素材加载失败（${response.status}）`);
+            return await blobToDataUrl(await response.blob());
+        })());
+    }
+    try {
+        return await cache.get(resolvedUrl);
+    } catch (error) {
+        console.warn('[reply-favorites] Could not embed decorative resource.', resolvedUrl, error);
+        return url;
+    }
+}
+
+async function embedCssUrls(value, cache) {
+    if (!value || value === 'none' || !value.includes('url(')) return value;
+    const matches = [...value.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)];
+    let embeddedValue = value;
+    for (const match of matches) {
+        if (!match[2]) continue;
+        const embeddedUrl = await getEmbeddedResourceUrl(match[2], cache);
+        embeddedValue = embeddedValue.replace(match[0], `url("${embeddedUrl.replaceAll('"', '\\"')}")`);
+    }
+    return embeddedValue;
+}
+
+async function inlineTavernResources(stage, cache) {
+    const resourceProperties = [
+        ['background-image', 'backgroundImage'],
+        ['mask-image', 'maskImage'],
+        ['-webkit-mask-image', 'webkitMaskImage'],
+        ['border-image-source', 'borderImageSource'],
+        ['list-style-image', 'listStyleImage'],
+    ];
+    const pseudoRules = [];
+    const elements = [stage, ...stage.querySelectorAll('*')];
+    let resourceId = 0;
+
+    for (const element of elements) {
+        if (element instanceof HTMLImageElement && element.currentSrc) {
+            element.src = await getEmbeddedResourceUrl(element.currentSrc, cache);
+            element.removeAttribute('srcset');
+        }
+        const style = getComputedStyle(element);
+        for (const [cssProperty, jsProperty] of resourceProperties) {
+            const value = style[jsProperty];
+            if (value?.includes('url(')) {
+                element.style.setProperty(cssProperty, await embedCssUrls(value, cache), 'important');
+            }
+        }
+
+        for (const pseudo of ['::before', '::after']) {
+            const pseudoStyle = getComputedStyle(element, pseudo);
+            const declarations = [];
+            for (const [cssProperty, jsProperty] of resourceProperties) {
+                const value = pseudoStyle[jsProperty];
+                if (value?.includes('url(')) {
+                    declarations.push(`${cssProperty}: ${await embedCssUrls(value, cache)} !important`);
+                }
+            }
+            if (declarations.length) {
+                const id = `r${resourceId++}`;
+                element.dataset.rfResourceId = id;
+                pseudoRules.push(`[data-rf-resource-id="${id}"]${pseudo} { ${declarations.join('; ')}; }`);
+            }
+        }
+    }
+
+    if (pseudoRules.length) {
+        const style = document.createElement('style');
+        style.dataset.rfEmbeddedResources = '';
+        style.textContent = pseudoRules.join('\n');
+        stage.prepend(style);
+    }
+}
+
+async function renderTavernItemCanvas(item, resourceCache) {
     const htmlToImage = await getHtmlToImage();
     const chatRoot = document.querySelector('#chat');
     if (!chatRoot) throw new Error('当前页面没有聊天区域');
@@ -1021,6 +1120,7 @@ async function renderTavernItemCanvas(item) {
 
     chatRoot.append(stage);
     try {
+        await inlineTavernResources(stage, resourceCache);
         await Promise.race([
             document.fonts?.ready || Promise.resolve(),
             new Promise(resolve => setTimeout(resolve, 1800)),
@@ -1088,9 +1188,10 @@ function drawExportHeader(context, settings, theme) {
 
 async function exportTavernImages(items, baseName) {
     const rendered = [];
+    const resourceCache = new Map();
     for (let index = 0; index < items.length; index++) {
-        toastr.info(`正在复刻酒馆楼层 ${index + 1}/${items.length}…`, '', { timeOut: 1200 });
-        const canvas = await renderTavernItemCanvas(items[index]);
+        toastr.info(`正在内嵌装饰并复刻酒馆楼层 ${index + 1}/${items.length}…`, '', { timeOut: 1200 });
+        const canvas = await renderTavernItemCanvas(items[index], resourceCache);
         rendered.push(...splitTavernCanvas(canvas));
     }
 
