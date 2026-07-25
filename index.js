@@ -3,6 +3,7 @@ import {
     eventSource,
     event_types,
     openCharacterChat,
+    messageFormatting,
     saveSettingsDebounced,
     selectCharacterById,
 } from '../../../../script.js';
@@ -15,12 +16,13 @@ const FAVORITE_ID_KEY = 'reply_favorite_id';
 const MAX_CANVAS_HEIGHT = 15000;
 const IMAGE_WIDTH = 1200;
 const settingsDefaults = Object.freeze({
-    version: 2,
+    version: 3,
     items: [],
     collections: [],
     sort: 'newest',
     defaultCapture: 'previous-user',
     imageTheme: 'warm',
+    imageRenderMode: 'card',
     imageBackground: 'theme',
     imageBackgroundColor: '#f4e8e0',
     imageTitle: '回复珍藏馆',
@@ -76,6 +78,7 @@ const imageThemes = Object.freeze({
 
 let filteredItems = [];
 const selectedIds = new Set();
+let htmlToImageLoader;
 
 function getContext() {
     return SillyTavern.getContext();
@@ -93,6 +96,7 @@ function getSettings() {
         ? settings.defaultCapture
         : 'previous-user';
     settings.imageTheme = Object.hasOwn(imageThemes, settings.imageTheme) ? settings.imageTheme : 'warm';
+    settings.imageRenderMode = ['card', 'tavern'].includes(settings.imageRenderMode) ? settings.imageRenderMode : 'card';
     settings.imageBackground = ['theme', 'cream', 'night', 'sage', 'custom'].includes(settings.imageBackground)
         ? settings.imageBackground
         : 'theme';
@@ -100,7 +104,7 @@ function getSettings() {
     settings.imageTitle = typeof settings.imageTitle === 'string' ? cleanText(settings.imageTitle).slice(0, 60) : '回复珍藏馆';
     settings.imageSubtitle = typeof settings.imageSubtitle === 'string' ? cleanText(settings.imageSubtitle).slice(0, 100) : '那些值得再读一遍的瞬间';
     settings.imageShowDate = settings.imageShowDate !== false;
-    settings.version = 2;
+    settings.version = 3;
     return settings;
 }
 
@@ -422,6 +426,13 @@ function settingsMarkup() {
                 <fieldset class="rf-image-settings">
                     <legend>图片导出样式</legend>
                     <div class="rf-image-settings-grid">
+                        <label class="rf-render-mode-field">图片内容样式
+                            <select id="rf-image-render-mode">
+                                <option value="card">珍藏卡片（稳定）</option>
+                                <option value="tavern">跟随当前酒馆楼层美化（实验）</option>
+                            </select>
+                            <small>酒馆模式会复制当前消息楼层及其 CSS；无法复刻时自动回退到珍藏卡片。</small>
+                        </label>
                         <label>图片主题
                             <select id="rf-image-theme">
                                 <option value="warm">暖茶</option>
@@ -451,6 +462,7 @@ function settingsMarkup() {
                         <label class="rf-image-show-date"><input id="rf-image-show-date" type="checkbox"> 在副标题后显示导出日期</label>
                     </div>
                     <div id="rf-image-theme-preview" aria-label="图片主题预览">
+                        <b class="rf-preview-mode-badge"></b>
                         <span class="rf-preview-title"></span>
                         <small class="rf-preview-subtitle"></small>
                         <i></i>
@@ -480,6 +492,7 @@ function updateImageThemePreview() {
     const background = getImageBackground();
     $('#rf-image-background-value').text(settings.imageBackgroundColor);
     $('.rf-custom-background').toggleClass('rf-visible', settings.imageBackground === 'custom');
+    $('.rf-image-settings').toggleClass('rf-tavern-mode', settings.imageRenderMode === 'tavern');
     $('#rf-image-theme-preview')
         .css({
             '--rf-preview-bg-start': background[0],
@@ -489,12 +502,14 @@ function updateImageThemePreview() {
             '--rf-preview-muted': theme.muted,
             '--rf-preview-accent': theme.accent,
         })
+        .find('.rf-preview-mode-badge').text(settings.imageRenderMode === 'tavern' ? '酒馆楼层' : '珍藏卡片').end()
         .find('.rf-preview-title').text(settings.imageTitle || '（无主标题）').end()
         .find('.rf-preview-subtitle').text(settings.imageSubtitle || '（无副标题）');
 }
 
 function updateImageSettingsUi() {
     const settings = getSettings();
+    $('#rf-image-render-mode').val(settings.imageRenderMode);
     $('#rf-image-theme').val(settings.imageTheme);
     $('#rf-image-background').val(settings.imageBackground);
     $('#rf-image-background-color').val(settings.imageBackgroundColor);
@@ -506,6 +521,7 @@ function updateImageSettingsUi() {
 
 function saveImagePreferences() {
     const settings = getSettings();
+    settings.imageRenderMode = String($('#rf-image-render-mode').val() || 'card');
     settings.imageTheme = String($('#rf-image-theme').val() || 'warm');
     settings.imageBackground = String($('#rf-image-background').val() || 'theme');
     settings.imageBackgroundColor = String($('#rf-image-background-color').val() || '#f4e8e0');
@@ -907,7 +923,218 @@ async function canvasToBlob(canvas) {
     });
 }
 
-async function exportImages(items, baseName) {
+async function getHtmlToImage() {
+    if (globalThis.htmlToImage?.toCanvas) return globalThis.htmlToImage;
+    if (!htmlToImageLoader) {
+        htmlToImageLoader = new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = new URL('./vendor/html-to-image/html-to-image.js', import.meta.url).href;
+            script.onload = () => globalThis.htmlToImage?.toCanvas
+                ? resolve(globalThis.htmlToImage)
+                : reject(new Error('楼层渲染组件未正确加载'));
+            script.onerror = () => reject(new Error('无法加载楼层渲染组件'));
+            document.head.append(script);
+        });
+    }
+    return await htmlToImageLoader;
+}
+
+function cleanTavernMessageClone(clone) {
+    [
+        '.for_checkbox',
+        '.del_checkbox',
+        '.mes_buttons',
+        '.mes_edit_buttons',
+        '.extraMesButtons',
+        '.swipe_left',
+        '.swipeRightBlock',
+        '.mesIDDisplay',
+        '.mes_timer',
+        '.tokenCounterDisplay',
+        '.rf-message-favorite',
+        '.mes_reasoning_details',
+        '.mes_media_wrapper:empty',
+        '.mes_file_wrapper:empty',
+        'script',
+    ].forEach(selector => clone.querySelectorAll(selector).forEach(element => element.remove()));
+    clone.classList.remove('last_mes', 'swipes_visible', 'fade');
+    clone.style.height = 'auto';
+    clone.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
+    clone.querySelectorAll('[contenteditable]').forEach(element => element.removeAttribute('contenteditable'));
+    clone.querySelectorAll('[tabindex]').forEach(element => element.removeAttribute('tabindex'));
+    return clone;
+}
+
+function getTavernMessageClone(item, message) {
+    const context = getContext();
+    const sourceIsCurrent = String(context.chatId || '') === String(item.source?.chatId || '');
+    const selector = `#chat .mes[mesid="${CSS.escape(String(message.messageIndex))}"]`;
+    const liveNode = sourceIsCurrent ? document.querySelector(selector) : null;
+    const matchingTemplate = document.querySelector(`#chat .mes[is_user="${message.isUser ? 'true' : 'false'}"]`);
+    const template = liveNode || matchingTemplate || document.querySelector('#chat .mes');
+    if (!template) throw new Error('当前页面没有可用于复刻美化的消息楼层');
+
+    const clone = cleanTavernMessageClone(template.cloneNode(true));
+    clone.setAttribute('mesid', String(message.messageIndex));
+    clone.setAttribute('ch_name', message.name);
+    clone.setAttribute('is_user', String(message.isUser));
+    clone.setAttribute('is_system', 'false');
+
+    const currentMessage = sourceIsCurrent ? context.chat?.[message.messageIndex] : null;
+    const canReuseRenderedContent = liveNode && cleanText(currentMessage?.mes) === cleanText(message.text);
+    if (!canReuseRenderedContent) {
+        const textElement = clone.querySelector('.mes_text');
+        if (!textElement) throw new Error('消息楼层缺少正文区域');
+        textElement.innerHTML = messageFormatting(
+            message.text,
+            message.name,
+            false,
+            message.isUser,
+            message.messageIndex,
+        );
+    }
+
+    const nameElement = clone.querySelector('.name_text');
+    if (nameElement) nameElement.textContent = message.name;
+    const avatar = clone.querySelector('.avatar img');
+    if (avatar && !message.isUser && item.avatar) {
+        avatar.src = item.avatar;
+        avatar.removeAttribute('srcset');
+    }
+    return clone;
+}
+
+async function renderTavernItemCanvas(item) {
+    const htmlToImage = await getHtmlToImage();
+    const chatRoot = document.querySelector('#chat');
+    if (!chatRoot) throw new Error('当前页面没有聊天区域');
+    const chatWidth = Math.ceil(chatRoot.getBoundingClientRect().width || 900);
+    const stage = document.createElement('div');
+    stage.className = 'rf-tavern-export-stage';
+    stage.style.width = `${Math.min(1200, Math.max(640, chatWidth))}px`;
+    stage.dataset.favoriteId = item.id;
+
+    for (const message of item.messages || []) {
+        stage.append(getTavernMessageClone(item, message));
+    }
+    if (!stage.children.length) throw new Error('收藏中没有可渲染的消息');
+
+    chatRoot.append(stage);
+    try {
+        await Promise.race([
+            document.fonts?.ready || Promise.resolve(),
+            new Promise(resolve => setTimeout(resolve, 1800)),
+        ]);
+        const canvas = await htmlToImage.toCanvas(stage, {
+            cacheBust: true,
+            pixelRatio: Math.min(2, Math.max(1.25, globalThis.devicePixelRatio || 1)),
+            backgroundColor: 'transparent',
+            imagePlaceholder: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
+            style: {
+                position: 'static',
+                top: 'auto',
+                left: 'auto',
+                zIndex: 'auto',
+                pointerEvents: 'none',
+            },
+            filter: node => !(node instanceof Element) || !node.matches('audio, video, iframe'),
+        });
+        if (!canvas.width || !canvas.height) throw new Error('生成的楼层图片尺寸无效');
+        return canvas;
+    } finally {
+        stage.remove();
+    }
+}
+
+function splitTavernCanvas(canvas) {
+    const targetWidth = IMAGE_WIDTH - 96;
+    const maxTargetHeight = MAX_CANVAS_HEIGHT - 260;
+    const maxSourceHeight = Math.max(1, Math.floor(maxTargetHeight * canvas.width / targetWidth));
+    if (canvas.height <= maxSourceHeight) return [canvas];
+
+    const parts = [];
+    for (let sourceY = 0; sourceY < canvas.height; sourceY += maxSourceHeight) {
+        const sourceHeight = Math.min(maxSourceHeight, canvas.height - sourceY);
+        const part = document.createElement('canvas');
+        part.width = canvas.width;
+        part.height = sourceHeight;
+        part.getContext('2d').drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, canvas.width, sourceHeight);
+        parts.push(part);
+    }
+    return parts;
+}
+
+function paintExportBackground(context, height, background) {
+    const gradient = context.createLinearGradient(0, 0, IMAGE_WIDTH, height);
+    gradient.addColorStop(0, background[0]);
+    gradient.addColorStop(1, background[1]);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, IMAGE_WIDTH, height);
+}
+
+function drawExportHeader(context, settings, theme) {
+    if (settings.imageTitle) {
+        context.fillStyle = theme.ink;
+        context.font = '700 38px "Microsoft YaHei", "PingFang SC", sans-serif';
+        context.fillText(settings.imageTitle, 48, 68, IMAGE_WIDTH - 96);
+    }
+    const subtitleParts = [settings.imageSubtitle, settings.imageShowDate ? formatDate(new Date().toISOString()) : ''].filter(Boolean);
+    if (subtitleParts.length) {
+        context.fillStyle = theme.muted;
+        context.font = '21px "Microsoft YaHei", "PingFang SC", sans-serif';
+        context.fillText(subtitleParts.join('  ·  '), 48, 105, IMAGE_WIDTH - 96);
+    }
+}
+
+async function exportTavernImages(items, baseName) {
+    const rendered = [];
+    for (let index = 0; index < items.length; index++) {
+        toastr.info(`正在复刻酒馆楼层 ${index + 1}/${items.length}…`, '', { timeOut: 1200 });
+        const canvas = await renderTavernItemCanvas(items[index]);
+        rendered.push(...splitTavernCanvas(canvas));
+    }
+
+    const entries = rendered.map(canvas => ({
+        canvas,
+        width: IMAGE_WIDTH - 96,
+        height: Math.ceil(canvas.height * (IMAGE_WIDTH - 96) / canvas.width),
+    }));
+    const pages = [];
+    let page = [];
+    let pageHeight = 150;
+    for (const entry of entries) {
+        if (page.length && pageHeight + entry.height + 36 > MAX_CANVAS_HEIGHT) {
+            pages.push({ entries: page, height: pageHeight + 60 });
+            page = [];
+            pageHeight = 150;
+        }
+        page.push(entry);
+        pageHeight += entry.height + 36;
+    }
+    if (page.length) pages.push({ entries: page, height: pageHeight + 60 });
+
+    const settings = getSettings();
+    const theme = getImageStyle();
+    const background = getImageBackground();
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+        const canvas = document.createElement('canvas');
+        canvas.width = IMAGE_WIDTH;
+        canvas.height = pages[pageIndex].height;
+        const context = canvas.getContext('2d');
+        paintExportBackground(context, canvas.height, background);
+        drawExportHeader(context, settings, theme);
+        let y = 132;
+        for (const entry of pages[pageIndex].entries) {
+            context.drawImage(entry.canvas, 48, y, entry.width, entry.height);
+            y += entry.height + 36;
+        }
+        const suffix = pages.length > 1 ? `-${pageIndex + 1}of${pages.length}` : '';
+        downloadBlob(await canvasToBlob(canvas), `${safeFilename(baseName)}-酒馆楼层${suffix}-${dateStamp()}.png`);
+        if (pages.length > 1) await new Promise(resolve => setTimeout(resolve, 250));
+    }
+}
+
+async function exportCardImages(items, baseName) {
     if (!items.length) {
         toastr.info('当前没有可导出的收藏');
         return;
@@ -946,22 +1173,8 @@ async function exportImages(items, baseName) {
         canvas.width = IMAGE_WIDTH;
         canvas.height = pages[pageIndex].height;
         const context = canvas.getContext('2d');
-        const gradient = context.createLinearGradient(0, 0, IMAGE_WIDTH, canvas.height);
-        gradient.addColorStop(0, background[0]);
-        gradient.addColorStop(1, background[1]);
-        context.fillStyle = gradient;
-        context.fillRect(0, 0, canvas.width, canvas.height);
-        if (settings.imageTitle) {
-            context.fillStyle = theme.ink;
-            context.font = '700 38px "Microsoft YaHei", "PingFang SC", sans-serif';
-            context.fillText(settings.imageTitle, 48, 68, IMAGE_WIDTH - 96);
-        }
-        const subtitleParts = [settings.imageSubtitle, settings.imageShowDate ? formatDate(new Date().toISOString()) : ''].filter(Boolean);
-        if (subtitleParts.length) {
-            context.fillStyle = theme.muted;
-            context.font = '21px "Microsoft YaHei", "PingFang SC", sans-serif';
-            context.fillText(subtitleParts.join('  ·  '), 48, 105, IMAGE_WIDTH - 96);
-        }
+        paintExportBackground(context, canvas.height, background);
+        drawExportHeader(context, settings, theme);
 
         let y = 132;
         for (const layout of pages[pageIndex].layouts) {
@@ -976,10 +1189,28 @@ async function exportImages(items, baseName) {
     }
 }
 
+async function exportImages(items, baseName) {
+    if (!items.length) {
+        toastr.info('当前没有可导出的收藏');
+        return;
+    }
+    if (getSettings().imageRenderMode !== 'tavern') {
+        await exportCardImages(items, baseName);
+        return;
+    }
+    try {
+        await exportTavernImages(items, baseName);
+    } catch (error) {
+        console.warn('[reply-favorites] Tavern-style export failed; falling back to card export.', error);
+        toastr.warning(`${error.message || '无法复刻当前楼层'}，已改用珍藏卡片导出`, '酒馆美化导出回退');
+        await exportCardImages(items, baseName);
+    }
+}
+
 function exportJsonBackup() {
     const backup = {
         format: 'sillytavern-reply-favorites',
-        version: 2,
+        version: 3,
         exportedAt: new Date().toISOString(),
         settings: structuredClone(getSettings()),
     };
@@ -996,12 +1227,13 @@ function parseBackup(text) {
     }
     const settings = backup.settings;
     return {
-        version: 2,
+        version: 3,
         items: settings.items.map(item => normalizeItem(structuredClone(item))),
         collections: Array.isArray(settings.collections) ? settings.collections.map(cleanText).filter(Boolean) : [],
         sort: settings.sort,
         defaultCapture: settings.defaultCapture,
         imageTheme: settings.imageTheme,
+        imageRenderMode: settings.imageRenderMode,
         imageBackground: settings.imageBackground,
         imageBackgroundColor: settings.imageBackgroundColor,
         imageTitle: settings.imageTitle,
@@ -1172,7 +1404,7 @@ function bindEvents() {
             getSettings().defaultCapture = String($(this).val());
             saveFavorites();
         })
-        .on('input change', '#rf-image-theme, #rf-image-background, #rf-image-background-color, #rf-image-title, #rf-image-subtitle, #rf-image-show-date', saveImagePreferences)
+        .on('input change', '#rf-image-render-mode, #rf-image-theme, #rf-image-background, #rf-image-background-color, #rf-image-title, #rf-image-subtitle, #rf-image-show-date', saveImagePreferences)
         .on('change', '#rf-select-all', function () {
             for (const item of filteredItems) {
                 this.checked ? selectedIds.add(item.id) : selectedIds.delete(item.id);

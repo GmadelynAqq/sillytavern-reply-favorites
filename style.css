@@ -495,6 +495,15 @@
     font-size: 12px;
 }
 
+.rf-render-mode-field {
+    grid-column: 1 / -1;
+}
+
+.rf-render-mode-field small {
+    opacity: .7;
+    line-height: 1.45;
+}
+
 .rf-image-settings-grid input,
 .rf-image-settings-grid select {
     width: 100%;
@@ -555,6 +564,19 @@
     color: var(--rf-preview-ink);
 }
 
+.rf-preview-mode-badge {
+    position: absolute;
+    z-index: 2;
+    top: 9px;
+    right: 12px;
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: var(--rf-preview-card);
+    color: var(--rf-preview-accent);
+    font-size: 9px;
+    letter-spacing: .08em;
+}
+
 #rf-image-theme-preview::after {
     content: "";
     position: absolute;
@@ -595,6 +617,18 @@
     background: var(--rf-preview-accent);
     box-shadow: 0 18px 0 var(--rf-preview-muted), 0 36px 0 var(--rf-preview-muted);
     opacity: .72;
+}
+
+.rf-tavern-export-stage {
+    position: fixed;
+    top: 0;
+    left: -20000px;
+    z-index: -2147483647;
+    display: flow-root;
+    min-height: 1px;
+    overflow: visible;
+    pointer-events: none;
+    background: transparent;
 }
 
 @keyframes rf-highlight {

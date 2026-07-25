@@ -26,12 +26,15 @@ https://github.com/GmadelynAqq/sillytavern-reply-favorites
 - “随机重温”会从当前筛选结果中抽取一条；来源失效的收藏会显示断链提示，但快照仍然保留。
 - 未勾选条目时，导出当前筛选结果；勾选后只导出勾选条目。
 - 支持 Markdown、单条 PNG 卡片和多条拼接长图；超长内容自动拆图。
+- PNG 可选择稳定的“珍藏卡片”模式，或实验性的“跟随当前酒馆楼层美化”模式。后者会复刻当前角色/用户楼层的 CSS、背景图、头像和排版，再放入导出画布。
 - PNG 图片支持暖茶、夜幕、森野、素墨四种主题，可切换背景预设或使用自定义颜色。
 - 图片顶部的主标题、副标题以及是否显示导出日期均可修改。
 - 支持 JSON 完整备份、合并导入和覆盖恢复。
 - 数据菜单提供重复收藏清理、批量删除与存储占用提示。
 
 收藏正文会作为快照保存在 SillyTavern 的扩展设置中，因此原消息被编辑或删除后仍可查看。
+
+“跟随当前酒馆楼层美化”依赖当前启用的主题与美化 CSS。若第三方背景图片禁止跨域读取，个别远程素材可能无法进入图片；若整个楼层复刻失败，扩展会自动回退到“珍藏卡片”模式，保证仍能导出正文。
 
 ## 更新
 
@@ -44,5 +47,9 @@ https://github.com/GmadelynAqq/sillytavern-reply-favorites
 ├── manifest.json
 ├── index.js
 ├── style.css
+├── vendor/
+│   └── html-to-image/
 └── README.md
 ```
+
+楼层复刻使用 vendored [`html-to-image`](https://github.com/bubkoo/html-to-image)（MIT License），许可证见 `vendor/html-to-image/LICENSE`。
