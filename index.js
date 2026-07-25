@@ -20,6 +20,58 @@ const settingsDefaults = Object.freeze({
     collections: [],
     sort: 'newest',
     defaultCapture: 'previous-user',
+    imageTheme: 'warm',
+    imageBackground: 'theme',
+    imageBackgroundColor: '#f4e8e0',
+    imageTitle: '回复珍藏馆',
+    imageSubtitle: '那些值得再读一遍的瞬间',
+    imageShowDate: true,
+});
+const imageThemes = Object.freeze({
+    warm: {
+        background: ['#f4e8e0', '#e9ddd5'],
+        card: '#fffdf9',
+        ink: '#382b28',
+        muted: '#9a8178',
+        soft: '#f5eee9',
+        softInk: '#66534c',
+        accent: '#b1715b',
+        line: '#e8d7ce',
+        mark: '#d7b7a9',
+    },
+    night: {
+        background: ['#161925', '#2b2235'],
+        card: '#252a38',
+        ink: '#f8f1ea',
+        muted: '#b8afbd',
+        soft: '#323747',
+        softInk: '#e3dce5',
+        accent: '#d9a27f',
+        line: '#5b5265',
+        mark: '#765e78',
+    },
+    forest: {
+        background: ['#dfe9e0', '#c8d7cd'],
+        card: '#f8fbf5',
+        ink: '#26352e',
+        muted: '#708078',
+        soft: '#e8f0e8',
+        softInk: '#41564b',
+        accent: '#557866',
+        line: '#bdd0c3',
+        mark: '#9eb7a6',
+    },
+    ink: {
+        background: ['#e8e5df', '#cbc7be'],
+        card: '#f8f6f1',
+        ink: '#202020',
+        muted: '#6f6d68',
+        soft: '#ece9e2',
+        softInk: '#3f3e3b',
+        accent: '#55514b',
+        line: '#c9c4bb',
+        mark: '#a8a39a',
+    },
 });
 
 let filteredItems = [];
@@ -40,6 +92,14 @@ function getSettings() {
     settings.defaultCapture = ['current', 'previous-user', '3', '5'].includes(settings.defaultCapture)
         ? settings.defaultCapture
         : 'previous-user';
+    settings.imageTheme = Object.hasOwn(imageThemes, settings.imageTheme) ? settings.imageTheme : 'warm';
+    settings.imageBackground = ['theme', 'cream', 'night', 'sage', 'custom'].includes(settings.imageBackground)
+        ? settings.imageBackground
+        : 'theme';
+    settings.imageBackgroundColor = /^#[0-9a-f]{6}$/i.test(settings.imageBackgroundColor) ? settings.imageBackgroundColor : '#f4e8e0';
+    settings.imageTitle = typeof settings.imageTitle === 'string' ? cleanText(settings.imageTitle).slice(0, 60) : '回复珍藏馆';
+    settings.imageSubtitle = typeof settings.imageSubtitle === 'string' ? cleanText(settings.imageSubtitle).slice(0, 100) : '那些值得再读一遍的瞬间';
+    settings.imageShowDate = settings.imageShowDate !== false;
     settings.version = 2;
     return settings;
 }
@@ -359,9 +419,101 @@ function settingsMarkup() {
                         <option value="5">最近 5 层</option>
                     </select>
                 </label>
+                <fieldset class="rf-image-settings">
+                    <legend>图片导出样式</legend>
+                    <div class="rf-image-settings-grid">
+                        <label>图片主题
+                            <select id="rf-image-theme">
+                                <option value="warm">暖茶</option>
+                                <option value="night">夜幕</option>
+                                <option value="forest">森野</option>
+                                <option value="ink">素墨</option>
+                            </select>
+                        </label>
+                        <label>画布背景
+                            <select id="rf-image-background">
+                                <option value="theme">跟随主题</option>
+                                <option value="cream">奶油纸</option>
+                                <option value="night">深夜蓝</option>
+                                <option value="sage">鼠尾草</option>
+                                <option value="custom">自定义颜色</option>
+                            </select>
+                        </label>
+                        <label class="rf-custom-background">自定义背景色
+                            <span><input id="rf-image-background-color" type="color"><code id="rf-image-background-value"></code></span>
+                        </label>
+                        <label>图片主标题
+                            <input id="rf-image-title" maxlength="60" placeholder="回复珍藏馆">
+                        </label>
+                        <label class="rf-image-subtitle-field">图片副标题
+                            <input id="rf-image-subtitle" maxlength="100" placeholder="那些值得再读一遍的瞬间">
+                        </label>
+                        <label class="rf-image-show-date"><input id="rf-image-show-date" type="checkbox"> 在副标题后显示导出日期</label>
+                    </div>
+                    <div id="rf-image-theme-preview" aria-label="图片主题预览">
+                        <span class="rf-preview-title"></span>
+                        <small class="rf-preview-subtitle"></small>
+                        <i></i>
+                    </div>
+                </fieldset>
                 <button id="rf-open-settings" class="menu_button"><i class="fa-solid fa-star"></i> 打开珍藏馆</button>
             </div>
         </div>`;
+}
+
+function getImageStyle() {
+    return imageThemes[getSettings().imageTheme] || imageThemes.warm;
+}
+
+function getImageBackground() {
+    const settings = getSettings();
+    if (settings.imageBackground === 'cream') return ['#f7eee7', '#e8ded6'];
+    if (settings.imageBackground === 'night') return ['#151827', '#29243a'];
+    if (settings.imageBackground === 'sage') return ['#dce8df', '#c7d7cc'];
+    if (settings.imageBackground === 'custom') return [settings.imageBackgroundColor, settings.imageBackgroundColor];
+    return getImageStyle().background;
+}
+
+function updateImageThemePreview() {
+    const settings = getSettings();
+    const theme = getImageStyle();
+    const background = getImageBackground();
+    $('#rf-image-background-value').text(settings.imageBackgroundColor);
+    $('.rf-custom-background').toggleClass('rf-visible', settings.imageBackground === 'custom');
+    $('#rf-image-theme-preview')
+        .css({
+            '--rf-preview-bg-start': background[0],
+            '--rf-preview-bg-end': background[1],
+            '--rf-preview-card': theme.card,
+            '--rf-preview-ink': theme.ink,
+            '--rf-preview-muted': theme.muted,
+            '--rf-preview-accent': theme.accent,
+        })
+        .find('.rf-preview-title').text(settings.imageTitle || '（无主标题）').end()
+        .find('.rf-preview-subtitle').text(settings.imageSubtitle || '（无副标题）');
+}
+
+function updateImageSettingsUi() {
+    const settings = getSettings();
+    $('#rf-image-theme').val(settings.imageTheme);
+    $('#rf-image-background').val(settings.imageBackground);
+    $('#rf-image-background-color').val(settings.imageBackgroundColor);
+    $('#rf-image-title').val(settings.imageTitle);
+    $('#rf-image-subtitle').val(settings.imageSubtitle);
+    $('#rf-image-show-date').prop('checked', settings.imageShowDate);
+    updateImageThemePreview();
+}
+
+function saveImagePreferences() {
+    const settings = getSettings();
+    settings.imageTheme = String($('#rf-image-theme').val() || 'warm');
+    settings.imageBackground = String($('#rf-image-background').val() || 'theme');
+    settings.imageBackgroundColor = String($('#rf-image-background-color').val() || '#f4e8e0');
+    settings.imageTitle = cleanText($('#rf-image-title').val()).slice(0, 60);
+    settings.imageSubtitle = cleanText($('#rf-image-subtitle').val()).slice(0, 100);
+    settings.imageShowDate = $('#rf-image-show-date').prop('checked');
+    saveFavorites();
+    updateImageThemePreview();
 }
 
 function getFilterValues() {
@@ -668,7 +820,7 @@ function drawLines(context, lines, x, y, lineHeight, color) {
     lines.forEach((line, index) => context.fillText(line, x, y + index * lineHeight));
 }
 
-function drawFavoriteCard(context, layout, y, avatar) {
+function drawFavoriteCard(context, layout, y, avatar, theme) {
     const { item, reply, prompt, note, tags, height } = layout;
     const x = 48;
     const width = IMAGE_WIDTH - 96;
@@ -677,7 +829,7 @@ function drawFavoriteCard(context, layout, y, avatar) {
     context.shadowColor = 'rgba(77, 52, 42, .10)';
     context.shadowBlur = 24;
     context.shadowOffsetY = 8;
-    context.fillStyle = '#fffdf9';
+    context.fillStyle = theme.card;
     roundedRect(context, x, y, width, height, 34);
     context.fill();
     context.restore();
@@ -689,20 +841,20 @@ function drawFavoriteCard(context, layout, y, avatar) {
         context.drawImage(avatar, x + 40, y + 38, 76, 76);
         context.restore();
     } else {
-        context.fillStyle = '#d7b7a9';
+        context.fillStyle = theme.mark;
         roundedRect(context, x + 40, y + 38, 76, 76, 24);
         context.fill();
-        context.fillStyle = '#fffaf6';
+        context.fillStyle = theme.card;
         context.font = '700 34px serif';
         context.textAlign = 'center';
         context.fillText('✦', x + 78, y + 89);
         context.textAlign = 'left';
     }
 
-    context.fillStyle = '#382b28';
+    context.fillStyle = theme.ink;
     context.font = '700 34px "Microsoft YaHei", "PingFang SC", sans-serif';
     context.fillText(item.title || item.characterName, x + 140, y + 72);
-    context.fillStyle = '#9a8178';
+    context.fillStyle = theme.muted;
     context.font = '23px "Microsoft YaHei", "PingFang SC", sans-serif';
     const imageMeta = item.title ? `${item.characterName}  ·  ${formatDate(item.createdAt)}` : `${formatDate(item.createdAt)}  ·  ${item.source?.chatId || '未知聊天'}`;
     context.fillText(imageMeta, x + 140, y + 106);
@@ -710,39 +862,39 @@ function drawFavoriteCard(context, layout, y, avatar) {
     let cursorY = y + 164;
     if (prompt.length) {
         const promptHeight = 46 + prompt.length * 39;
-        context.fillStyle = '#f5eee9';
+        context.fillStyle = theme.soft;
         roundedRect(context, x + 40, cursorY, width - 80, promptHeight, 22);
         context.fill();
-        context.fillStyle = '#a07565';
+        context.fillStyle = theme.accent;
         context.font = '700 21px "Microsoft YaHei", "PingFang SC", sans-serif';
         context.fillText('当时你说', x + 64, cursorY + 31);
         context.font = '25px "Microsoft YaHei", "PingFang SC", sans-serif';
-        drawLines(context, prompt, x + 64, cursorY + 70, 39, '#66534c');
+        drawLines(context, prompt, x + 64, cursorY + 70, 39, theme.softInk);
         cursorY += promptHeight + 34;
     }
 
     context.font = '34px "Microsoft YaHei", "PingFang SC", sans-serif';
-    drawLines(context, reply, x + 40, cursorY + 34, 53, '#382b28');
+    drawLines(context, reply, x + 40, cursorY + 34, 53, theme.ink);
     cursorY += reply.length * 53 + 48;
 
     if (tags) {
-        context.fillStyle = '#b1715b';
+        context.fillStyle = theme.accent;
         context.font = '700 23px "Microsoft YaHei", "PingFang SC", sans-serif';
         context.fillText(`# ${tags}`, x + 40, cursorY + 20);
         cursorY += 58;
     }
 
     if (note.length) {
-        context.fillStyle = '#e8d7ce';
+        context.fillStyle = theme.line;
         context.fillRect(x + 40, cursorY, 4, note.length * 39 + 25);
-        context.fillStyle = '#8c7168';
+        context.fillStyle = theme.accent;
         context.font = '700 21px "Microsoft YaHei", "PingFang SC", sans-serif';
         context.fillText('收藏备注', x + 62, cursorY + 20);
         context.font = '25px "Microsoft YaHei", "PingFang SC", sans-serif';
-        drawLines(context, note, x + 62, cursorY + 59, 39, '#66534c');
+        drawLines(context, note, x + 62, cursorY + 59, 39, theme.softInk);
     }
 
-    context.fillStyle = '#c6a99d';
+    context.fillStyle = theme.muted;
     context.font = '20px Georgia, serif';
     context.textAlign = 'right';
     context.fillText('REPLY KEEPSAKE  ✦', x + width - 40, y + height - 36);
@@ -786,26 +938,34 @@ async function exportImages(items, baseName) {
         if (!avatars.has(item.avatar)) avatars.set(item.avatar, await loadImage(item.avatar));
     }
 
+    const settings = getSettings();
+    const theme = getImageStyle();
+    const background = getImageBackground();
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
         const canvas = document.createElement('canvas');
         canvas.width = IMAGE_WIDTH;
         canvas.height = pages[pageIndex].height;
         const context = canvas.getContext('2d');
         const gradient = context.createLinearGradient(0, 0, IMAGE_WIDTH, canvas.height);
-        gradient.addColorStop(0, '#f4e8e0');
-        gradient.addColorStop(1, '#e9ddd5');
+        gradient.addColorStop(0, background[0]);
+        gradient.addColorStop(1, background[1]);
         context.fillStyle = gradient;
         context.fillRect(0, 0, canvas.width, canvas.height);
-        context.fillStyle = '#5b4038';
-        context.font = '700 38px "Microsoft YaHei", "PingFang SC", sans-serif';
-        context.fillText('回复珍藏馆', 48, 68);
-        context.fillStyle = '#9a7d72';
-        context.font = '21px "Microsoft YaHei", "PingFang SC", sans-serif';
-        context.fillText(`那些值得再读一遍的瞬间  ·  ${formatDate(new Date().toISOString())}`, 48, 105);
+        if (settings.imageTitle) {
+            context.fillStyle = theme.ink;
+            context.font = '700 38px "Microsoft YaHei", "PingFang SC", sans-serif';
+            context.fillText(settings.imageTitle, 48, 68, IMAGE_WIDTH - 96);
+        }
+        const subtitleParts = [settings.imageSubtitle, settings.imageShowDate ? formatDate(new Date().toISOString()) : ''].filter(Boolean);
+        if (subtitleParts.length) {
+            context.fillStyle = theme.muted;
+            context.font = '21px "Microsoft YaHei", "PingFang SC", sans-serif';
+            context.fillText(subtitleParts.join('  ·  '), 48, 105, IMAGE_WIDTH - 96);
+        }
 
         let y = 132;
         for (const layout of pages[pageIndex].layouts) {
-            drawFavoriteCard(context, layout, y, avatars.get(layout.item.avatar));
+            drawFavoriteCard(context, layout, y, avatars.get(layout.item.avatar), theme);
             y += layout.height + 36;
         }
 
@@ -841,6 +1001,12 @@ function parseBackup(text) {
         collections: Array.isArray(settings.collections) ? settings.collections.map(cleanText).filter(Boolean) : [],
         sort: settings.sort,
         defaultCapture: settings.defaultCapture,
+        imageTheme: settings.imageTheme,
+        imageBackground: settings.imageBackground,
+        imageBackgroundColor: settings.imageBackgroundColor,
+        imageTitle: settings.imageTitle,
+        imageSubtitle: settings.imageSubtitle,
+        imageShowDate: settings.imageShowDate,
     };
 }
 
@@ -1006,6 +1172,7 @@ function bindEvents() {
             getSettings().defaultCapture = String($(this).val());
             saveFavorites();
         })
+        .on('input change', '#rf-image-theme, #rf-image-background, #rf-image-background-color, #rf-image-title, #rf-image-subtitle, #rf-image-show-date', saveImagePreferences)
         .on('change', '#rf-select-all', function () {
             for (const item of filteredItems) {
                 this.checked ? selectedIds.add(item.id) : selectedIds.delete(item.id);
@@ -1075,6 +1242,7 @@ function initialize() {
     $('#extensions_settings2').append(settingsMarkup());
     bindEvents();
     $('#rf-default-capture').val(getSettings().defaultCapture);
+    updateImageSettingsUi();
     enhanceMessages();
 
     [
