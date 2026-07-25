@@ -1,0 +1,11 @@
+{
+    "display_name": "回复珍藏馆",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "GmadelynAqq",
+    "version": "1.0.0",
+    "description": "收藏喜欢的角色回复，并导出为 Markdown 或 PNG 图片。"
+}
