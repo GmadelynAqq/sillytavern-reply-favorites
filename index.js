@@ -740,7 +740,23 @@ function downloadBlob(blob, filename) {
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // Android's download manager may not consume a large blob URL immediately.
+    // Revoking it after one second makes Chrome report a failed download even
+    // though image rendering itself succeeded.
+    setTimeout(() => URL.revokeObjectURL(url), isMobileImageExport() ? 60_000 : 10_000);
+}
+
+async function saveImageBlob(blob, filename, fileHandle) {
+    if (!fileHandle) {
+        downloadBlob(blob, filename);
+        return;
+    }
+    const writable = await fileHandle.createWritable();
+    try {
+        await writable.write(blob);
+    } finally {
+        await writable.close();
+    }
 }
 
 function exportMarkdown() {
@@ -975,6 +991,36 @@ async function getHtmlToImage() {
     return await htmlToImageLoader;
 }
 
+async function screenshotNodeToCanvas(node, options = {}) {
+    if (globalThis.modernScreenshot?.domToCanvas) {
+        return await globalThis.modernScreenshot.domToCanvas(node, {
+            scale: options.pixelRatio || 1,
+            width: options.width,
+            height: options.height,
+            backgroundColor: options.backgroundColor === 'transparent' ? null : options.backgroundColor,
+            style: options.style,
+            filter: options.filter,
+            font: false,
+            features: { restoreScrollPosition: true },
+            fetch: {
+                bypassingCache: Boolean(options.cacheBust),
+                placeholderImage: options.imagePlaceholder,
+            },
+            onCreateForeignObjectSvg: svg => {
+                const style = svg.ownerDocument.createElement('style');
+                style.textContent = 'q::before, q::after { content: none !important; }';
+                let defs = svg.querySelector('defs');
+                if (!defs) {
+                    defs = svg.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'defs');
+                    svg.prepend(defs);
+                }
+                defs.append(style);
+            },
+        });
+    }
+    return await (await getHtmlToImage()).toCanvas(node, options);
+}
+
 function cleanTavernMessageClone(clone) {
     [
         '.for_checkbox',
@@ -988,6 +1034,8 @@ function cleanTavernMessageClone(clone) {
         '.mes_reasoning_details',
         '.mes_media_wrapper:empty',
         '.mes_file_wrapper:empty',
+        '.TH-collapse-code-block-button',
+        '.TH-render > pre',
         'script',
     ].forEach(selector => clone.querySelectorAll(selector).forEach(element => element.remove()));
     clone.classList.remove('last_mes', 'swipes_visible', 'fade');
@@ -996,6 +1044,23 @@ function cleanTavernMessageClone(clone) {
     clone.querySelectorAll('[contenteditable]').forEach(element => element.removeAttribute('contenteditable'));
     clone.querySelectorAll('[tabindex]').forEach(element => element.removeAttribute('tabindex'));
     return clone;
+}
+
+function serializeIframeDocuments(sourceRoot, clonedRoot) {
+    const sourceFrames = [...sourceRoot.querySelectorAll('iframe')];
+    const clonedFrames = [...clonedRoot.querySelectorAll('iframe')];
+    sourceFrames.forEach((sourceFrame, index) => {
+        const clonedFrame = clonedFrames[index];
+        if (!clonedFrame) return;
+        try {
+            const frameDocument = sourceFrame.contentDocument;
+            if (!frameDocument?.documentElement) return;
+            clonedFrame.removeAttribute('src');
+            clonedFrame.setAttribute('srcdoc', `<!doctype html>${frameDocument.documentElement.outerHTML}`);
+        } catch (error) {
+            console.debug('[reply-favorites] Could not serialize an isolated iframe; preserving its original source.', error);
+        }
+    });
 }
 
 function parseRenderedMessageHtml(html) {
@@ -1013,7 +1078,9 @@ function getLiveMessageNode(messageIndex) {
 function captureRenderedMessageHtml(messageIndex) {
     const liveNode = getLiveMessageNode(messageIndex);
     if (!liveNode) return '';
-    return cleanTavernMessageClone(liveNode.cloneNode(true)).outerHTML;
+    const clone = liveNode.cloneNode(true);
+    serializeIframeDocuments(liveNode, clone);
+    return cleanTavernMessageClone(clone).outerHTML;
 }
 
 function syncFavoriteRenderedSnapshots(messageIndexes = null) {
@@ -1212,15 +1279,165 @@ async function inlineTavernResources(stage, cache) {
     }
 }
 
+function waitForIframe(iframe, timeout = 1800) {
+    try {
+        if (iframe.contentDocument?.readyState === 'complete') return Promise.resolve();
+    } catch {
+        // Sandboxed iframes without allow-same-origin are handled by the srcdoc fallback below.
+    }
+    return Promise.race([
+        new Promise(resolve => iframe.addEventListener('load', resolve, { once: true })),
+        new Promise(resolve => setTimeout(resolve, timeout)),
+    ]);
+}
+
+function iframeSourceDocument(iframe) {
+    try {
+        if (iframe.contentDocument?.documentElement) {
+            return { document: iframe.contentDocument, cleanup: () => {} };
+        }
+    } catch {
+        // Continue with a script-free srcdoc copy.
+    }
+
+    const srcdoc = iframe.getAttribute('srcdoc');
+    if (!srcdoc) return null;
+    const parsed = new DOMParser().parseFromString(srcdoc, 'text/html');
+    parsed.querySelectorAll('script').forEach(script => script.remove());
+    const helper = document.createElement('iframe');
+    helper.className = 'rf-iframe-capture-helper';
+    helper.setAttribute('aria-hidden', 'true');
+    helper.style.cssText = 'position:fixed;left:-100000px;top:0;visibility:hidden;pointer-events:none;border:0;';
+    helper.style.width = `${Math.max(1, Math.ceil(iframe.getBoundingClientRect().width || 640))}px`;
+    helper.style.height = `${Math.max(1, Math.ceil(iframe.getBoundingClientRect().height || 360))}px`;
+    helper.srcdoc = `<!doctype html>${parsed.documentElement.outerHTML}`;
+    document.body.append(helper);
+    return {
+        helper,
+        get document() {
+            try {
+                return helper.contentDocument;
+            } catch {
+                return null;
+            }
+        },
+        cleanup: () => helper.remove(),
+    };
+}
+
+async function materializeTavernIframes(stage) {
+    const iframes = [...stage.querySelectorAll('iframe')];
+    for (const iframe of iframes) {
+        await waitForIframe(iframe);
+        let source = iframeSourceDocument(iframe);
+        if (!source) continue;
+        try {
+            if (source.helper) {
+                await waitForIframe(source.helper);
+                source = { ...source, document: source.document };
+            }
+            const frameDocument = source.document;
+            const target = frameDocument?.body || frameDocument?.documentElement;
+            if (!target) continue;
+            await Promise.race([
+                frameDocument.fonts?.ready || Promise.resolve(),
+                new Promise(resolve => setTimeout(resolve, 1000)),
+            ]);
+
+            const rect = iframe.getBoundingClientRect();
+            const width = Math.max(1, Math.ceil(rect.width || target.scrollWidth || 640));
+            const height = Math.max(1, Math.ceil(rect.height || target.scrollHeight || 360));
+            const frameCanvas = await screenshotNodeToCanvas(target, {
+                cacheBust: false,
+                skipFonts: true,
+                pixelRatio: 1,
+                width,
+                height,
+                canvasWidth: width,
+                canvasHeight: height,
+                backgroundColor: 'transparent',
+                imagePlaceholder: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
+                filter: node => !(node instanceof Element) || !node.matches('audio, video'),
+            });
+            if (!frameCanvas.width || !frameCanvas.height) continue;
+
+            const image = document.createElement('img');
+            image.className = 'rf-materialized-iframe';
+            image.alt = iframe.title || '';
+            image.src = frameCanvas.toDataURL('image/png');
+            image.style.cssText = iframe.getAttribute('style') || '';
+            image.style.setProperty('display', 'block');
+            image.style.setProperty('width', `${width}px`);
+            image.style.setProperty('height', `${height}px`);
+            image.style.setProperty('max-width', '100%');
+            image.style.setProperty('object-fit', 'contain');
+            const computed = getComputedStyle(iframe);
+            image.style.setProperty('border', computed.border);
+            image.style.setProperty('border-radius', computed.borderRadius);
+            await Promise.race([
+                image.decode(),
+                new Promise(resolve => setTimeout(resolve, 1200)),
+            ]);
+            iframe.replaceWith(image);
+        } catch (error) {
+            console.warn('[reply-favorites] Could not flatten an embedded Tavern Helper/st-chatu8 frame.', error);
+        } finally {
+            source.cleanup();
+        }
+    }
+}
+
+function waitForTavernDecorators(stage, timeout = 2200, quietPeriod = 350) {
+    return new Promise(resolve => {
+        let finished = false;
+        let quietTimer;
+        let timeoutTimer;
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(quietTimer);
+            clearTimeout(timeoutTimer);
+            observer.disconnect();
+            resolve();
+        };
+        const scheduleQuietFinish = () => {
+            clearTimeout(quietTimer);
+            quietTimer = setTimeout(finish, quietPeriod);
+        };
+        const observer = new MutationObserver(scheduleQuietFinish);
+        observer.observe(stage, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            characterData: true,
+        });
+        timeoutTimer = setTimeout(finish, timeout);
+        requestAnimationFrame(() => requestAnimationFrame(scheduleQuietFinish));
+    });
+}
+
+function isMobileImageExport() {
+    return Math.min(globalThis.innerWidth || 9999, globalThis.screen?.width || 9999) <= 700
+        || globalThis.matchMedia?.('(pointer: coarse)').matches === true;
+}
+
 async function renderTavernItemCanvas(item, resourceCache, constrainHeight = false) {
-    const htmlToImage = await getHtmlToImage();
     const chatRoot = document.querySelector('#chat');
     if (!chatRoot) throw new Error('当前页面没有聊天区域');
     const chatWidth = Math.ceil(chatRoot.getBoundingClientRect().width || 900);
+    const mobileExport = isMobileImageExport();
     const stage = document.createElement('div');
     stage.className = 'rf-tavern-export-stage';
-    stage.style.width = `${Math.min(1200, Math.max(640, chatWidth))}px`;
+    stage.style.width = `${Math.min(1200, Math.max(mobileExport ? 320 : 640, chatWidth))}px`;
     stage.dataset.favoriteId = item.id;
+    const compatibilityStyle = document.createElement('style');
+    compatibilityStyle.textContent = `
+        .rf-tavern-export-stage q::before,
+        .rf-tavern-export-stage q::after {
+            content: none !important;
+        }
+    `;
+    stage.append(compatibilityStyle);
 
     for (const message of item.messages || []) {
         stage.append(getTavernMessageClone(item, message));
@@ -1229,18 +1446,25 @@ async function renderTavernItemCanvas(item, resourceCache, constrainHeight = fal
 
     chatRoot.append(stage);
     try {
+        // TavernHelper and st-chatu8 decorate freshly inserted message HTML
+        // asynchronously. Give their observers time to replace regex/code
+        // blocks before taking the export snapshot.
+        await waitForTavernDecorators(stage);
+        stage.querySelectorAll('.mes').forEach(cleanTavernMessageClone);
+        await materializeTavernIframes(stage);
         await inlineTavernResources(stage, resourceCache);
         await Promise.race([
             document.fonts?.ready || Promise.resolve(),
             new Promise(resolve => setTimeout(resolve, 1800)),
         ]);
-        const basePixelRatio = Math.min(2, Math.max(1.25, globalThis.devicePixelRatio || 1));
+        const basePixelRatio = mobileExport ? 1 : Math.min(2, Math.max(1.25, globalThis.devicePixelRatio || 1));
         const stageHeight = Math.max(1, Math.ceil(stage.getBoundingClientRect().height || stage.scrollHeight || 1));
         const pixelRatio = constrainHeight
-            ? Math.min(basePixelRatio, Math.max(0.35, (MAX_CANVAS_HEIGHT - 320) / stageHeight))
+            ? Math.min(basePixelRatio, Math.max(0.35, ((mobileExport ? 7800 : MAX_CANVAS_HEIGHT) - 320) / stageHeight))
             : basePixelRatio;
-        const canvas = await htmlToImage.toCanvas(stage, {
-            cacheBust: true,
+        const canvas = await screenshotNodeToCanvas(stage, {
+            cacheBust: !mobileExport,
+            skipFonts: mobileExport,
             pixelRatio,
             backgroundColor: 'transparent',
             imagePlaceholder: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=',
@@ -1251,7 +1475,7 @@ async function renderTavernItemCanvas(item, resourceCache, constrainHeight = fal
                 zIndex: 'auto',
                 pointerEvents: 'none',
             },
-            filter: node => !(node instanceof Element) || !node.matches('audio, video, iframe'),
+            filter: node => !(node instanceof Element) || !node.matches('audio, video'),
         });
         if (!canvas.width || !canvas.height) throw new Error('生成的楼层图片尺寸无效');
         return canvas;
@@ -1260,9 +1484,9 @@ async function renderTavernItemCanvas(item, resourceCache, constrainHeight = fal
     }
 }
 
-function splitTavernCanvas(canvas) {
-    const targetWidth = IMAGE_WIDTH - 96;
-    const maxTargetHeight = MAX_CANVAS_HEIGHT - 260;
+function splitTavernCanvas(canvas, exportWidth = IMAGE_WIDTH, maxCanvasHeight = MAX_CANVAS_HEIGHT) {
+    const targetWidth = exportWidth - Math.round(exportWidth * 0.08);
+    const maxTargetHeight = maxCanvasHeight - Math.round(260 * exportWidth / IMAGE_WIDTH);
     const maxSourceHeight = Math.max(1, Math.floor(maxTargetHeight * canvas.width / targetWidth));
     if (canvas.height <= maxSourceHeight) return [canvas];
 
@@ -1278,43 +1502,50 @@ function splitTavernCanvas(canvas) {
     return parts;
 }
 
-function paintExportBackground(context, height, background) {
-    const gradient = context.createLinearGradient(0, 0, IMAGE_WIDTH, height);
+function paintExportBackground(context, height, background, width = IMAGE_WIDTH) {
+    const gradient = context.createLinearGradient(0, 0, width, height);
     gradient.addColorStop(0, background[0]);
     gradient.addColorStop(1, background[1]);
     context.fillStyle = gradient;
-    context.fillRect(0, 0, IMAGE_WIDTH, height);
+    context.fillRect(0, 0, width, height);
 }
 
-function drawExportHeader(context, settings, theme) {
+function drawExportHeader(context, settings, theme, width = IMAGE_WIDTH) {
+    const scale = width / IMAGE_WIDTH;
+    const inset = Math.round(48 * scale);
     if (settings.imageTitle) {
         context.fillStyle = theme.ink;
-        context.font = '700 38px "Microsoft YaHei", "PingFang SC", sans-serif';
-        context.fillText(settings.imageTitle, 48, 68, IMAGE_WIDTH - 96);
+        context.font = `700 ${Math.round(38 * scale)}px "Microsoft YaHei", "PingFang SC", sans-serif`;
+        context.fillText(settings.imageTitle, inset, Math.round(68 * scale), width - inset * 2);
     }
     const subtitleParts = [settings.imageSubtitle, settings.imageShowDate ? formatDate(new Date().toISOString()) : ''].filter(Boolean);
     if (subtitleParts.length) {
         context.fillStyle = theme.muted;
-        context.font = '21px "Microsoft YaHei", "PingFang SC", sans-serif';
-        context.fillText(subtitleParts.join('  ·  '), 48, 105, IMAGE_WIDTH - 96);
+        context.font = `${Math.round(21 * scale)}px "Microsoft YaHei", "PingFang SC", sans-serif`;
+        context.fillText(subtitleParts.join('  ·  '), inset, Math.round(105 * scale), width - inset * 2);
     }
 }
 
-async function exportTavernImages(items, baseName) {
+async function exportTavernImages(items, baseName, fileHandle) {
     const rendered = [];
     const resourceCache = new Map();
     const singleItem = items.length === 1;
+    const mobileExport = isMobileImageExport();
+    const exportWidth = mobileExport ? 900 : IMAGE_WIDTH;
+    const maxCanvasHeight = mobileExport ? 8000 : MAX_CANVAS_HEIGHT;
+    const inset = Math.round(exportWidth * 0.04);
+    const headerHeight = Math.round(150 * exportWidth / IMAGE_WIDTH);
     for (let index = 0; index < items.length; index++) {
         toastr.info(`正在内嵌装饰并复刻酒馆楼层 ${index + 1}/${items.length}…`, '', { timeOut: 1200 });
         const canvas = await renderTavernItemCanvas(items[index], resourceCache, singleItem);
-        rendered.push(...(singleItem ? [canvas] : splitTavernCanvas(canvas)));
+        rendered.push(...(singleItem ? [canvas] : splitTavernCanvas(canvas, exportWidth, maxCanvasHeight)));
     }
 
     const entries = rendered.map(canvas => {
-        const targetWidth = IMAGE_WIDTH - 96;
+        const targetWidth = exportWidth - inset * 2;
         const naturalHeight = Math.ceil(canvas.height * targetWidth / canvas.width);
-        const scale = singleItem && naturalHeight > MAX_CANVAS_HEIGHT - 260
-            ? (MAX_CANVAS_HEIGHT - 260) / naturalHeight
+        const scale = singleItem && naturalHeight > maxCanvasHeight - Math.round(260 * exportWidth / IMAGE_WIDTH)
+            ? (maxCanvasHeight - Math.round(260 * exportWidth / IMAGE_WIDTH)) / naturalHeight
             : 1;
         return {
             canvas,
@@ -1324,40 +1555,41 @@ async function exportTavernImages(items, baseName) {
     });
     const pages = [];
     let page = [];
-    let pageHeight = 150;
+    let pageHeight = headerHeight;
     for (const entry of entries) {
-        if (page.length && pageHeight + entry.height + 36 > MAX_CANVAS_HEIGHT) {
-            pages.push({ entries: page, height: pageHeight + 60 });
+        if (page.length && pageHeight + entry.height + Math.round(36 * exportWidth / IMAGE_WIDTH) > maxCanvasHeight) {
+            pages.push({ entries: page, height: pageHeight + Math.round(60 * exportWidth / IMAGE_WIDTH) });
             page = [];
-            pageHeight = 150;
+            pageHeight = headerHeight;
         }
         page.push(entry);
-        pageHeight += entry.height + 36;
+        pageHeight += entry.height + Math.round(36 * exportWidth / IMAGE_WIDTH);
     }
-    if (page.length) pages.push({ entries: page, height: pageHeight + 60 });
+    if (page.length) pages.push({ entries: page, height: pageHeight + Math.round(60 * exportWidth / IMAGE_WIDTH) });
 
     const settings = getSettings();
     const theme = getImageStyle();
     const background = getImageBackground();
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
         const canvas = document.createElement('canvas');
-        canvas.width = IMAGE_WIDTH;
+        canvas.width = exportWidth;
         canvas.height = pages[pageIndex].height;
         const context = canvas.getContext('2d');
-        paintExportBackground(context, canvas.height, background);
-        drawExportHeader(context, settings, theme);
-        let y = 132;
+        paintExportBackground(context, canvas.height, background, exportWidth);
+        drawExportHeader(context, settings, theme, exportWidth);
+        let y = Math.round(132 * exportWidth / IMAGE_WIDTH);
         for (const entry of pages[pageIndex].entries) {
-            context.drawImage(entry.canvas, Math.round((IMAGE_WIDTH - entry.width) / 2), y, entry.width, entry.height);
-            y += entry.height + 36;
+            context.drawImage(entry.canvas, Math.round((exportWidth - entry.width) / 2), y, entry.width, entry.height);
+            y += entry.height + Math.round(36 * exportWidth / IMAGE_WIDTH);
         }
         const suffix = pages.length > 1 ? `-${pageIndex + 1}of${pages.length}` : '';
-        downloadBlob(await canvasToBlob(canvas), `${safeFilename(baseName)}-酒馆楼层${suffix}-${dateStamp()}.png`);
+        const filename = `${safeFilename(baseName)}-酒馆楼层${suffix}-${dateStamp()}.png`;
+        await saveImageBlob(await canvasToBlob(canvas), filename, pageIndex === 0 ? fileHandle : null);
         if (pages.length > 1) await new Promise(resolve => setTimeout(resolve, 250));
     }
 }
 
-async function exportCardImages(items, baseName) {
+async function exportCardImages(items, baseName, fileHandle) {
     if (!items.length) {
         toastr.info('当前没有可导出的收藏');
         return;
@@ -1407,26 +1639,28 @@ async function exportCardImages(items, baseName) {
 
         const suffix = pages.length > 1 ? `-${pageIndex + 1}of${pages.length}` : '';
         const blob = await canvasToBlob(canvas);
-        downloadBlob(blob, `${safeFilename(baseName)}${suffix}-${dateStamp()}.png`);
+        const filename = `${safeFilename(baseName)}${suffix}-${dateStamp()}.png`;
+        await saveImageBlob(blob, filename, pageIndex === 0 ? fileHandle : null);
         if (pages.length > 1) await new Promise(resolve => setTimeout(resolve, 250));
     }
 }
 
-async function runImageExport(items, baseName) {
+async function runImageExport(items, baseName, fileHandlePromise) {
     if (!items.length) {
         toastr.info('当前没有可导出的收藏');
         return;
     }
+    const fileHandle = await fileHandlePromise;
+    if (fileHandle === null) return;
     if (getSettings().imageRenderMode !== 'tavern') {
-        await exportCardImages(items, baseName);
+        await exportCardImages(items, baseName, fileHandle);
         return;
     }
     try {
-        await exportTavernImages(items, baseName);
+        await exportTavernImages(items, baseName, fileHandle);
     } catch (error) {
-        console.warn('[reply-favorites] Tavern-style export failed; falling back to card export.', error);
-        toastr.warning(`${error.message || '无法复刻当前楼层'}，已改用珍藏卡片导出`, '酒馆美化导出回退');
-        await exportCardImages(items, baseName);
+        console.error('[reply-favorites] Tavern-style export failed.', error);
+        toastr.error(error?.message || '楼层美化图片生成失败，请重试', '酒馆美化导出失败');
     }
 }
 
@@ -1437,7 +1671,22 @@ function exportImages(items, baseName) {
         return activeExport;
     }
 
-    const task = runImageExport(items, baseName);
+    let fileHandlePromise = Promise.resolve(undefined);
+    if (items.length === 1 && isMobileImageExport() && typeof globalThis.showSaveFilePicker === 'function') {
+        const tavernSuffix = getSettings().imageRenderMode === 'tavern' ? '-酒馆楼层' : '';
+        fileHandlePromise = globalThis.showSaveFilePicker({
+            suggestedName: `${safeFilename(baseName)}${tavernSuffix}-${dateStamp()}.png`,
+            types: [{
+                description: 'PNG 图片',
+                accept: { 'image/png': ['.png'] },
+            }],
+        }).catch(error => {
+            if (error?.name === 'AbortError') return null;
+            throw error;
+        });
+    }
+
+    const task = runImageExport(items, baseName, fileHandlePromise);
     globalThis[IMAGE_EXPORT_LOCK_KEY] = task;
     $('#rf-export-image, .rf-card-image').prop('disabled', true).attr('aria-busy', 'true');
     const clearExportLock = () => {

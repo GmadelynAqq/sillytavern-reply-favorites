@@ -378,6 +378,11 @@
     white-space: normal;
 }
 
+.rf-rendered-snapshot q::before,
+.rf-rendered-snapshot q::after {
+    content: none !important;
+}
+
 .rf-captured {
     display: grid;
     gap: 12px;
