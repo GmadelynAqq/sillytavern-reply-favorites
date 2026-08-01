@@ -25,11 +25,13 @@ const settingsDefaults = Object.freeze({
     defaultCapture: 'previous-user',
     imageTheme: 'warm',
     imageRenderMode: 'card',
+    imageShowBackground: true,
     imageBackground: 'theme',
     imageBackgroundColor: '#f4e8e0',
     imageTitle: '回复珍藏馆',
     imageSubtitle: '那些值得再读一遍的瞬间',
     imageShowDate: true,
+    fabPosition: null,
 });
 const imageThemes = Object.freeze({
     warm: {
@@ -81,6 +83,8 @@ const imageThemes = Object.freeze({
 let filteredItems = [];
 const selectedIds = new Set();
 let htmlToImageLoader;
+let fabDragState = null;
+let suppressFabClick = false;
 
 function getContext() {
     return SillyTavern.getContext();
@@ -99,6 +103,7 @@ function getSettings() {
         : 'previous-user';
     settings.imageTheme = Object.hasOwn(imageThemes, settings.imageTheme) ? settings.imageTheme : 'warm';
     settings.imageRenderMode = ['card', 'tavern'].includes(settings.imageRenderMode) ? settings.imageRenderMode : 'card';
+    settings.imageShowBackground = settings.imageShowBackground !== false;
     settings.imageBackground = ['theme', 'cream', 'night', 'sage', 'custom'].includes(settings.imageBackground)
         ? settings.imageBackground
         : 'theme';
@@ -106,6 +111,15 @@ function getSettings() {
     settings.imageTitle = typeof settings.imageTitle === 'string' ? cleanText(settings.imageTitle).slice(0, 60) : '回复珍藏馆';
     settings.imageSubtitle = typeof settings.imageSubtitle === 'string' ? cleanText(settings.imageSubtitle).slice(0, 100) : '那些值得再读一遍的瞬间';
     settings.imageShowDate = settings.imageShowDate !== false;
+    const fabPosition = settings.fabPosition;
+    settings.fabPosition = fabPosition
+        && Number.isFinite(Number(fabPosition.x))
+        && Number.isFinite(Number(fabPosition.y))
+        ? {
+            x: Math.min(1, Math.max(0, Number(fabPosition.x))),
+            y: Math.min(1, Math.max(0, Number(fabPosition.y))),
+        }
+        : null;
     settings.version = 3;
     return settings;
 }
@@ -405,7 +419,7 @@ function galleryMarkup() {
                 <main id="rf-list"></main>
             </section>
         </div>
-        <button id="rf-open-fab" title="打开回复珍藏馆" aria-label="打开回复珍藏馆">
+        <button id="rf-open-fab" title="点击打开；拖动可移动位置" aria-label="打开回复珍藏馆（可拖动）">
             <i class="fa-solid fa-star"></i><span>珍藏馆</span>
         </button>`;
 }
@@ -445,6 +459,7 @@ function settingsMarkup() {
                                 <option value="ink">素墨</option>
                             </select>
                         </label>
+                        <label class="rf-image-show-background"><input id="rf-image-show-background" type="checkbox"> 绘制图片外层背景</label>
                         <label>画布背景
                             <select id="rf-image-background">
                                 <option value="theme">跟随主题</option>
@@ -495,9 +510,11 @@ function updateImageThemePreview() {
     const theme = getImageStyle();
     const background = getImageBackground();
     $('#rf-image-background-value').text(settings.imageBackgroundColor);
-    $('.rf-custom-background').toggleClass('rf-visible', settings.imageBackground === 'custom');
+    $('#rf-image-background, #rf-image-background-color').prop('disabled', !settings.imageShowBackground);
+    $('.rf-custom-background').toggleClass('rf-visible', settings.imageShowBackground && settings.imageBackground === 'custom');
     $('.rf-image-settings').toggleClass('rf-tavern-mode', settings.imageRenderMode === 'tavern');
     $('#rf-image-theme-preview')
+        .toggleClass('rf-transparent-preview', !settings.imageShowBackground)
         .css({
             '--rf-preview-bg-start': background[0],
             '--rf-preview-bg-end': background[1],
@@ -515,6 +532,7 @@ function updateImageSettingsUi() {
     const settings = getSettings();
     $('#rf-image-render-mode').val(settings.imageRenderMode);
     $('#rf-image-theme').val(settings.imageTheme);
+    $('#rf-image-show-background').prop('checked', settings.imageShowBackground);
     $('#rf-image-background').val(settings.imageBackground);
     $('#rf-image-background-color').val(settings.imageBackgroundColor);
     $('#rf-image-title').val(settings.imageTitle);
@@ -527,6 +545,7 @@ function saveImagePreferences() {
     const settings = getSettings();
     settings.imageRenderMode = String($('#rf-image-render-mode').val() || 'card');
     settings.imageTheme = String($('#rf-image-theme').val() || 'warm');
+    settings.imageShowBackground = $('#rf-image-show-background').prop('checked');
     settings.imageBackground = String($('#rf-image-background').val() || 'theme');
     settings.imageBackgroundColor = String($('#rf-image-background-color').val() || '#f4e8e0');
     settings.imageTitle = cleanText($('#rf-image-title').val()).slice(0, 60);
@@ -706,6 +725,98 @@ function renderGallery() {
             </div>
         </article>`;
     }).join(''));
+}
+
+function clampFabPosition(left, top, element) {
+    const edge = 8;
+    const maxLeft = Math.max(edge, globalThis.innerWidth - element.offsetWidth - edge);
+    const maxTop = Math.max(edge, globalThis.innerHeight - element.offsetHeight - edge);
+    return {
+        left: Math.min(maxLeft, Math.max(edge, left)),
+        top: Math.min(maxTop, Math.max(edge, top)),
+        maxLeft,
+        maxTop,
+        edge,
+    };
+}
+
+function applyFabPosition() {
+    const element = document.querySelector('#rf-open-fab');
+    if (!element) return;
+    const position = getSettings().fabPosition;
+    if (!position) {
+        element.style.removeProperty('left');
+        element.style.removeProperty('right');
+        element.style.removeProperty('top');
+        element.style.removeProperty('bottom');
+        return;
+    }
+    const bounds = clampFabPosition(0, 0, element);
+    const availableWidth = Math.max(0, bounds.maxLeft - bounds.edge);
+    const availableHeight = Math.max(0, bounds.maxTop - bounds.edge);
+    element.style.left = `${Math.round(bounds.edge + position.x * availableWidth)}px`;
+    element.style.top = `${Math.round(bounds.edge + position.y * availableHeight)}px`;
+    element.style.right = 'auto';
+    element.style.bottom = 'auto';
+}
+
+function beginFabDrag(event) {
+    const pointerEvent = event.originalEvent || event;
+    if (pointerEvent.button !== undefined && pointerEvent.button !== 0) return;
+    const element = event.currentTarget;
+    const rect = element.getBoundingClientRect();
+    fabDragState = {
+        element,
+        pointerId: pointerEvent.pointerId,
+        startX: pointerEvent.clientX,
+        startY: pointerEvent.clientY,
+        startLeft: rect.left,
+        startTop: rect.top,
+        moved: false,
+    };
+    element.setPointerCapture?.(pointerEvent.pointerId);
+}
+
+function moveFab(event) {
+    if (!fabDragState) return;
+    const pointerEvent = event.originalEvent || event;
+    if (pointerEvent.pointerId !== fabDragState.pointerId) return;
+    const deltaX = pointerEvent.clientX - fabDragState.startX;
+    const deltaY = pointerEvent.clientY - fabDragState.startY;
+    if (!fabDragState.moved && Math.hypot(deltaX, deltaY) < 6) return;
+    fabDragState.moved = true;
+    pointerEvent.preventDefault();
+    const bounds = clampFabPosition(
+        fabDragState.startLeft + deltaX,
+        fabDragState.startTop + deltaY,
+        fabDragState.element,
+    );
+    fabDragState.element.classList.add('rf-dragging');
+    fabDragState.element.style.left = `${Math.round(bounds.left)}px`;
+    fabDragState.element.style.top = `${Math.round(bounds.top)}px`;
+    fabDragState.element.style.right = 'auto';
+    fabDragState.element.style.bottom = 'auto';
+}
+
+function endFabDrag(event) {
+    if (!fabDragState) return;
+    const pointerEvent = event.originalEvent || event;
+    if (pointerEvent.pointerId !== fabDragState.pointerId) return;
+    const { element, moved } = fabDragState;
+    element.releasePointerCapture?.(pointerEvent.pointerId);
+    element.classList.remove('rf-dragging');
+    fabDragState = null;
+    if (!moved) return;
+    pointerEvent.preventDefault();
+    const rect = element.getBoundingClientRect();
+    const bounds = clampFabPosition(rect.left, rect.top, element);
+    getSettings().fabPosition = {
+        x: bounds.maxLeft === bounds.edge ? 0 : (bounds.left - bounds.edge) / (bounds.maxLeft - bounds.edge),
+        y: bounds.maxTop === bounds.edge ? 0 : (bounds.top - bounds.edge) / (bounds.maxTop - bounds.edge),
+    };
+    saveFavorites();
+    suppressFabClick = true;
+    setTimeout(() => { suppressFabClick = false; }, 250);
 }
 
 function openGallery() {
@@ -1428,7 +1539,10 @@ async function renderTavernItemCanvas(item, resourceCache, constrainHeight = fal
     const mobileExport = isMobileImageExport();
     const stage = document.createElement('div');
     stage.className = 'rf-tavern-export-stage';
-    stage.style.width = `${Math.min(1200, Math.max(mobileExport ? 320 : 640, chatWidth))}px`;
+    // Render mobile exports on a wider off-screen floor. Keeping the live
+    // 320–390px chat width makes long replies extremely tall, then forces the
+    // final compositor to shrink the whole floor into a narrow unreadable strip.
+    stage.style.width = `${mobileExport ? 720 : Math.min(1200, Math.max(640, chatWidth))}px`;
     stage.dataset.favoriteId = item.id;
     const compatibilityStyle = document.createElement('style');
     compatibilityStyle.textContent = `
@@ -1457,10 +1571,11 @@ async function renderTavernItemCanvas(item, resourceCache, constrainHeight = fal
             document.fonts?.ready || Promise.resolve(),
             new Promise(resolve => setTimeout(resolve, 1800)),
         ]);
-        const basePixelRatio = mobileExport ? 1 : Math.min(2, Math.max(1.25, globalThis.devicePixelRatio || 1));
+        const basePixelRatio = mobileExport ? 1.5 : Math.min(2, Math.max(1.25, globalThis.devicePixelRatio || 1));
         const stageHeight = Math.max(1, Math.ceil(stage.getBoundingClientRect().height || stage.scrollHeight || 1));
+        const renderHeightLimit = mobileExport ? 28_000 : MAX_CANVAS_HEIGHT;
         const pixelRatio = constrainHeight
-            ? Math.min(basePixelRatio, Math.max(0.35, ((mobileExport ? 7800 : MAX_CANVAS_HEIGHT) - 320) / stageHeight))
+            ? Math.min(basePixelRatio, Math.max(mobileExport ? 1 : 0.35, (renderHeightLimit - 320) / stageHeight))
             : basePixelRatio;
         const canvas = await screenshotNodeToCanvas(stage, {
             cacheBust: !mobileExport,
@@ -1531,8 +1646,8 @@ async function exportTavernImages(items, baseName, fileHandle) {
     const resourceCache = new Map();
     const singleItem = items.length === 1;
     const mobileExport = isMobileImageExport();
-    const exportWidth = mobileExport ? 900 : IMAGE_WIDTH;
-    const maxCanvasHeight = mobileExport ? 8000 : MAX_CANVAS_HEIGHT;
+    const exportWidth = mobileExport ? 1080 : IMAGE_WIDTH;
+    const maxCanvasHeight = mobileExport ? 30_000 : MAX_CANVAS_HEIGHT;
     const inset = Math.round(exportWidth * 0.04);
     const headerHeight = Math.round(150 * exportWidth / IMAGE_WIDTH);
     for (let index = 0; index < items.length; index++) {
@@ -1575,7 +1690,7 @@ async function exportTavernImages(items, baseName, fileHandle) {
         canvas.width = exportWidth;
         canvas.height = pages[pageIndex].height;
         const context = canvas.getContext('2d');
-        paintExportBackground(context, canvas.height, background, exportWidth);
+        if (settings.imageShowBackground) paintExportBackground(context, canvas.height, background, exportWidth);
         drawExportHeader(context, settings, theme, exportWidth);
         let y = Math.round(132 * exportWidth / IMAGE_WIDTH);
         for (const entry of pages[pageIndex].entries) {
@@ -1628,7 +1743,7 @@ async function exportCardImages(items, baseName, fileHandle) {
         canvas.width = IMAGE_WIDTH;
         canvas.height = pages[pageIndex].height;
         const context = canvas.getContext('2d');
-        paintExportBackground(context, canvas.height, background);
+        if (settings.imageShowBackground) paintExportBackground(context, canvas.height, background);
         drawExportHeader(context, settings, theme);
 
         let y = 132;
@@ -1672,7 +1787,8 @@ function exportImages(items, baseName) {
     }
 
     let fileHandlePromise = Promise.resolve(undefined);
-    if (items.length === 1 && isMobileImageExport() && typeof globalThis.showSaveFilePicker === 'function') {
+    const touchDevice = globalThis.matchMedia?.('(pointer: coarse)').matches === true;
+    if (items.length === 1 && touchDevice && typeof globalThis.showSaveFilePicker === 'function') {
         const tavernSuffix = getSettings().imageRenderMode === 'tavern' ? '-酒馆楼层' : '';
         fileHandlePromise = globalThis.showSaveFilePicker({
             suggestedName: `${safeFilename(baseName)}${tavernSuffix}-${dateStamp()}.png`,
@@ -1724,11 +1840,13 @@ function parseBackup(text) {
         defaultCapture: settings.defaultCapture,
         imageTheme: settings.imageTheme,
         imageRenderMode: settings.imageRenderMode,
+        imageShowBackground: settings.imageShowBackground,
         imageBackground: settings.imageBackground,
         imageBackgroundColor: settings.imageBackgroundColor,
         imageTitle: settings.imageTitle,
         imageSubtitle: settings.imageSubtitle,
         imageShowDate: settings.imageShowDate,
+        fabPosition: settings.fabPosition,
     };
 }
 
@@ -1898,7 +2016,15 @@ function bindEvents() {
             event.stopPropagation();
             await toggleFavorite(Number($(this).closest('.mes').attr('mesid')), $(this), event.shiftKey);
         })
-        .on('click.replyFavorites', '#rf-open-fab, #rf-open-settings', openGallery)
+        .on('click.replyFavorites', '#rf-open-settings', openGallery)
+        .on('click.replyFavorites', '#rf-open-fab', function (event) {
+            if (suppressFabClick) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                return;
+            }
+            openGallery();
+        })
         .on('click.replyFavorites', '#rf-close', closeGallery)
         .on('click.replyFavorites', '#rf-overlay', function (event) {
             if (event.target === this) closeGallery();
@@ -1922,7 +2048,7 @@ function bindEvents() {
             getSettings().defaultCapture = String($(this).val());
             saveFavorites();
         })
-        .on('input.replyFavorites change.replyFavorites', '#rf-image-render-mode, #rf-image-theme, #rf-image-background, #rf-image-background-color, #rf-image-title, #rf-image-subtitle, #rf-image-show-date', saveImagePreferences)
+        .on('input.replyFavorites change.replyFavorites', '#rf-image-render-mode, #rf-image-theme, #rf-image-show-background, #rf-image-background, #rf-image-background-color, #rf-image-title, #rf-image-subtitle, #rf-image-show-date', saveImagePreferences)
         .on('change.replyFavorites', '#rf-select-all', function () {
             for (const item of filteredItems) {
                 this.checked ? selectedIds.add(item.id) : selectedIds.delete(item.id);
@@ -1997,9 +2123,16 @@ function initialize() {
     $('.rf-settings').remove();
     document.documentElement.insertAdjacentHTML('beforeend', galleryMarkup());
     $('#extensions_settings2').append(settingsMarkup());
+    const fab = document.querySelector('#rf-open-fab');
+    fab?.addEventListener('pointerdown', beginFabDrag);
+    fab?.addEventListener('pointermove', moveFab);
+    fab?.addEventListener('pointerup', endFabDrag);
+    fab?.addEventListener('pointercancel', endFabDrag);
+    $(window).off('.replyFavorites').on('resize.replyFavorites', applyFabPosition);
     bindEvents();
     $('#rf-default-capture').val(getSettings().defaultCapture);
     updateImageSettingsUi();
+    requestAnimationFrame(applyFabPosition);
     enhanceMessages();
 
     const previousHandlers = globalThis[EVENT_HANDLERS_KEY];

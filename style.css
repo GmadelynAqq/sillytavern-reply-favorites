@@ -37,11 +37,19 @@
     box-shadow: 0 10px 30px rgba(32, 19, 15, .28);
     cursor: pointer;
     backdrop-filter: blur(12px);
+    touch-action: none;
+    user-select: none;
 }
 
 #rf-open-fab:hover {
     transform: translateY(-2px);
     box-shadow: 0 14px 34px rgba(32, 19, 15, .36);
+}
+
+#rf-open-fab.rf-dragging {
+    cursor: grabbing;
+    transform: none;
+    transition: none;
 }
 
 #rf-overlay {
@@ -515,16 +523,19 @@
 }
 
 .rf-image-subtitle-field,
+.rf-image-show-background,
 .rf-image-show-date {
     grid-column: 1 / -1;
 }
 
+.rf-image-show-background,
 .rf-image-show-date {
     display: flex !important;
     grid-template-columns: auto 1fr;
     align-items: center;
 }
 
+.rf-image-show-background input,
 .rf-image-show-date input {
     width: 16px;
     min-width: 16px;
@@ -567,6 +578,17 @@
     border-radius: 13px;
     background: linear-gradient(135deg, var(--rf-preview-bg-start), var(--rf-preview-bg-end));
     color: var(--rf-preview-ink);
+}
+
+#rf-image-theme-preview.rf-transparent-preview {
+    background-color: #fff;
+    background-image:
+        linear-gradient(45deg, #ddd 25%, transparent 25%),
+        linear-gradient(-45deg, #ddd 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #ddd 75%),
+        linear-gradient(-45deg, transparent 75%, #ddd 75%);
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-size: 16px 16px;
 }
 
 .rf-preview-mode-badge {
@@ -763,6 +785,7 @@
     }
 
     .rf-image-subtitle-field,
+    .rf-image-show-background,
     .rf-image-show-date {
         grid-column: auto;
     }
